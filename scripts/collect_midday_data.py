@@ -16,10 +16,11 @@
 用法：
   python collect_midday_data.py --date 2026-08-21
 """
-import json, re, ssl, socket, os, urllib.request, urllib.parse, time, argparse
+import json, re, ssl, socket, os, sys, urllib.request, urllib.parse, time, argparse
 from datetime import datetime
 
-ssl._create_default_https_context = ssl._create_unverified_context
+# 安全：恢复 TLS 证书校验（金融数据不建议关闭证书验证）。
+# 仅保留 IPv4 强制 + 备用域名降级（见 get()）。
 
 # ---- 强制 IPv4（关键修复）----
 _orig_getaddrinfo = socket.getaddrinfo
@@ -202,8 +203,12 @@ def collect_breadth():
             break
         page += 1
         time.sleep(0.15)
-    return {"total": total, "up": up, "down": dn, "flat": fl,
-            "method": "全A逐页精确计数(pz=100)"}
+    valid = up + dn + fl
+    missing = total - valid  # 无报价/停牌/无法判定涨跌的标的，不计入有效样本
+    return {"listed_total": total, "valid_total": valid, "missing": missing,
+            "up": up, "down": dn, "flat": fl,
+            "up_ratio_valid": (up / valid) if valid else 0.0,
+            "method": "全A逐页精确计数(pz=100)，上涨占比按有效样本计算"}
 
 
 # ============ 5. 涨停/跌停池 ============
@@ -292,17 +297,92 @@ def collect_news(n=40):
         return []
 
 
+# ============ 8b. 资讯过滤 + 同事件聚类 ============
+def _norm_title(t):
+    # 去掉标点/空白，取前 12 字符作为"同事件"指纹
+    return re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", t or "")[:12]
+
+def filter_news(news, date, mode):
+    """按报告日期 + 时段过滤，并对同一事件的重复标题聚类（只保留首次出现）。
+    - strict-midday：仅保留 当日 09:00–11:30 的资讯；
+    - late-snapshot / render-archive：保留当日全部，但 as_of 标注为采集时刻。
+    """
+    out, seen = [], set()
+    for n in news:
+        tm = n.get("time") or ""
+        if date not in tm:                       # 必须是报告当日
+            continue
+        hhmm = tm[-8:-3].replace(":", "")
+        if mode == "strict-midday" and hhmm > "1130":
+            continue
+        key = _norm_title(n.get("title"))
+        if key in seen:                          # 同事件聚类
+            continue
+        seen.add(key)
+        out.append(n)
+    return out
+
+
+def detect_mode(now=None):
+    now = now or datetime.now()
+    hm = now.hour * 100 + now.minute
+    return "strict-midday" if 1130 <= hm < 1300 else "late-snapshot"
+
+
+def build_quality(DATE, snapshot, minutes, br, news, mode):
+    errors, warnings = [], []
+    miss_idx = [n for c, n in INDEX_MAP if c not in (snapshot or {})]
+    if miss_idx:
+        errors.append("指数缺失: " + ",".join(miss_idx))
+    bad_min = []
+    for c, n in INDEX_MAP:
+        ms = (minutes or {}).get(c) or []
+        if not ms or ms[-1]["t"] > "1130":
+            bad_min.append(n)
+    if bad_min:
+        warnings.append("分时末点非11:30: " + ",".join(bad_min))
+    if br:
+        if (br.get("up", 0) + br.get("down", 0) + br.get("flat", 0) + br.get("missing", 0)
+                != br.get("listed_total", 0)):
+            errors.append("广度恒等式不成立 up+down+flat+missing != listed_total")
+    bad_news = [n for n in (news or []) if DATE not in (n.get("time") or "")]
+    if bad_news:
+        warnings.append(f"{len(bad_news)} 条资讯非报告当日")
+    level = "fail" if errors else ("warn" if warnings else "pass")
+    return {"level": level, "errors": errors, "warnings": warnings}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
+    ap.add_argument("--mode", default=None,
+                    choices=["strict-midday", "late-snapshot", "render-archive"],
+                    help="运行模式；不传则按当前时刻自动判定（11:30-13:00→strict，其余→late）")
     ap.add_argument("--holdings", default=None,
                     help="持仓配置文件 JSON 路径；持仓为个人私有配置不随 Skill 分发，见 holdings.example.json")
     args = ap.parse_args()
     DATE = args.date
+    DC = DATE.replace("-", "")
+    MODE = args.mode or detect_mode()
+    collected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"=== 午间复盘采集 {DATE} | 模式={MODE} ===")
+
+    # —— 运行闸门 ——
+    if MODE == "strict-midday":
+        hm = datetime.now().hour * 100 + datetime.now().minute
+        if not (1130 <= hm < 1300):
+            print("[FAIL] strict-midday 仅允许 11:30–13:00 采集；"
+                  "午后请用 --mode late-snapshot，或保留中午 JSON 后 --mode render-archive 重渲。")
+            sys.exit(2)
+    # 禁止用今天的分时写入非今日文件（腾讯分时接口只返回当日数据）
+    today = datetime.now().strftime("%Y-%m-%d")
+    if DATE != today:
+        print(f"[FAIL] --date({DATE}) 必须等于采集当日({today})；"
+              f"否则分时/快照为今日数据却写入历史日期，造成伪历史。")
+        sys.exit(2)
+
     global HOLD
     HOLD = load_holdings(args.holdings or _default_holdings())
-    DC = DATE.replace("-", "")
-    print(f"=== 午间复盘采集 {DATE} ===")
 
     OUT = {}
     OUT["snapshot"] = collect_snapshot()
@@ -324,7 +404,7 @@ def main():
     print(f"[OK] 概念板块 {len(con)} 个")
 
     br = collect_breadth()
-    print(f"[OK] 涨跌家数 {br}")
+    print(f"[OK] 涨跌家数 有效样本{br.get('valid_total')}（listed={br.get('listed_total')}, missing={br.get('missing')}）")
 
     zt = collect_zt(DC); OUT["zt_pool"] = zt
     print(f"[OK] 涨停池 {len(zt)} 只")
@@ -351,8 +431,10 @@ def main():
         time.sleep(0.3)
     OUT["fundflow"] = ff
 
-    nw = collect_news(40); OUT["news"] = nw
-    print(f"[OK] 资讯 {len(nw)} 条")
+    raw_news = collect_news(40)
+    nw = filter_news(raw_news, DATE, MODE)
+    OUT["news"] = nw
+    print(f"[OK] 资讯 原始{len(raw_news)} → 过滤后{len(nw)} 条（模式={MODE}）")
 
     # 两市成交额
     d = parse_tencent(get("https://qt.gtimg.cn/q=sh000001,sz399001"))
@@ -360,14 +442,30 @@ def main():
     sz = d.get("sz399001", {}).get("amount_wan", 0)
     OUT["market_amount"] = {"sh_wan": sh, "sz_wan": sz, "total_yi": (sh + sz) / 1e4}
 
+    # —— 数据质量闸门 ——
+    q = build_quality(DATE, OUT["snapshot"], OUT["minutes"], br, OUT["news"], MODE)
+    sources = {
+        "minutes": {"status": "ok" if OUT["minutes"] else "missing", "as_of": "11:30",
+                    "coverage": f"{len(OUT['minutes'])}/{len(INDEX_MAP) + len(HOLD)}"},
+        "breadth": {"status": "ok" if br else "missing",
+                    "as_of": collected_at[-8:-3], "listed_total": br.get("listed_total") if br else None},
+        "news": {"status": "ok" if OUT["news"] else "missing",
+                 "as_of": "11:30" if MODE == "strict-midday" else collected_at[-8:-3]},
+    }
     OUT["breadth"] = br
-    OUT["meta"] = {"date": DATE, "gen_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    OUT["meta"] = {"schema_version": 2, "report_date": DATE,
+                  "collected_at": collected_at, "mode": MODE}
+    OUT["quality"] = q
+    OUT["sources"] = sources
 
-    with open(f"midday_merged_{DC}.json", "w", encoding="utf-8") as f:
-        json.dump(OUT, f, ensure_ascii=False, indent=1)
-    with open(f"breadth_{DC}.json", "w", encoding="utf-8") as f:
-        json.dump(br, f, ensure_ascii=False, indent=1)
-    print(f"\n=== 完成 -> midday_merged_{DC}.json + breadth_{DC}.json ===")
+    # 核心数据缺失 → 非零退出，不生成"伪完整"报告（仍落盘供排查）
+    if q["level"] == "fail":
+        print(f"\n[FAIL] 数据质量不达标，已终止生成。errors={q['errors']}")
+        with open(f"midday_merged_{DC}.json", "w", encoding="utf-8") as f:
+            json.dump(OUT, f, ensure_ascii=False, indent=1)
+        sys.exit(3)
+    print(f"\n=== 完成 -> midday_merged_{DC}.json (quality={q['level']}, "
+          f"warnings={len(q['warnings'])}) ===")
 
 
 if __name__ == "__main__":
