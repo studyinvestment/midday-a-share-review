@@ -2,3 +2,6 @@
 holdings.json
 __pycache__/
 *.pyc
+
+# 三态回归测试的产物（每次 run_three_state.py 重跑生成，不入仓库）
+tests/fixtures/*_review.html
