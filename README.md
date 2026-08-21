@@ -37,5 +37,17 @@ python generate_midday_review.py --date 2026-08-21 \
 - WorkBuddy：`~/.workbuddy/skills/midday-a-share-review/`
 - Codex：`<项目>/.codex/skills/midday-a-share-review/`（结构一致，SKILL.md + scripts/ 直接可用）
 
+## 运行模式与数据质量（v2）
+- 采集器 `--mode`：`strict-midday`（默认，11:30–13:00 才采）/ `late-snapshot`（13:00 后，板块等标"当前快照"）/ `render-archive`（用已存 JSON 重渲，唯一可信历史补跑）。
+- 采集器产出 `quality(level/errors/warnings)` + `sources(status/as_of)`；核心数据缺失→非零退出、不生成报告。
+- 涨跌家数分母用 `valid_total`（剔除无报价/停牌），非 `listed_total`。
+
+## 上传到 GitHub（仓库维护，非运行时依赖）
+`tools/deploy_to_github.py` 走 REST API 建仓+上传（自动排除 `holdings.json`），属维护工具，不随运行时 skill 加载：
+```bash
+python tools/deploy_to_github.py --token <PAT> --owner studyinvestment --repo midday-a-share-review --template
+```
+（token 建议用环境变量/一次性传入，避免留在 shell 历史；用完即轮换。）
+
 ## 设为 GitHub Template
 仓库已设计为可复用模板：fork/clone 后填入自己的 `holdings.json` 即可。
