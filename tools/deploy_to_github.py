@@ -12,7 +12,7 @@
   - 自动排除 holdings.json / __pycache__（避免把个人真实持仓推到公开/共享仓库）。
   - 首次上传会在新仓库 main 分支创建初始提交。
 """
-import os, sys, json, base64, argparse, urllib.request, urllib.error
+import os, sys, json, base64, argparse, subprocess, urllib.request, urllib.error
 
 API = "https://api.github.com"
 # 本脚本位于 <skill>/tools/，上传根目录为上一级（即 skill 根）
@@ -32,6 +32,24 @@ def api(method, path, token, body=None):
             return r.read().decode("utf-8", "replace"), r.status
     except urllib.error.HTTPError as e:
         return e.read().decode("utf-8", "replace"), e.code
+
+
+def get_token(explicit):
+    """优先用显式 --token；否则从 git credential store 取 github.com 的 token，避免命令行暴露。"""
+    if explicit:
+        return explicit
+    try:
+        out = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+        for line in out.splitlines():
+            if line.startswith("password="):
+                return line[len("password="):]
+    except Exception:
+        pass
+    return None
 
 
 def collect_files(root):
@@ -66,7 +84,7 @@ def create_repo(token, owner, repo, private, desc, template):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--token", required=True, help="GitHub PAT（repo 权限）")
+    ap.add_argument("--token", default=None, help="GitHub PAT（repo 权限）；省略时自动从 git credential 取")
     ap.add_argument("--owner", required=True, help="GitHub 用户名或组织名")
     ap.add_argument("--repo", default="midday-a-share-review")
     ap.add_argument("--public", action="store_true", help="公开仓库（默认私有）")
@@ -74,8 +92,12 @@ def main():
     ap.add_argument("--desc", default="A股午间复盘 Skill 模板（WorkBuddy/Codex 通用，持仓外置）")
     args = ap.parse_args()
     private = not args.public
+    token = get_token(args.token)
+    if not token:
+        print("[FAIL] 未提供 --token 且无法从 git credential 取得 github.com token。")
+        sys.exit(1)
 
-    ok, msg = create_repo(args.token, args.owner, args.repo, private, args.desc, args.template)
+    ok, msg = create_repo(token, args.owner, args.repo, private, args.desc, args.template)
     if not ok:
         print(f"[FAIL] 创建仓库失败：\n{msg}")
         sys.exit(1)
@@ -86,14 +108,14 @@ def main():
     for rel, full in files:
         with open(full, "rb") as fh:
             content = base64.b64encode(fh.read()).decode("ascii")
-        get, gc = api("GET", f"/repos/{args.owner}/{args.repo}/contents/{rel}", args.token)
+        get, gc = api("GET", f"/repos/{args.owner}/{args.repo}/contents/{rel}", token)
         body = {"message": f"add {rel}", "content": content, "branch": "main"}
         if gc == 200:
             try:
                 body["sha"] = json.loads(get)["sha"]
             except Exception:
                 pass
-        r, st = api("PUT", f"/repos/{args.owner}/{args.repo}/contents/{rel}", args.token, body)
+        r, st = api("PUT", f"/repos/{args.owner}/{args.repo}/contents/{rel}", token, body)
         if st in (200, 201):
             print(f"  [OK] {rel}")
         else:
