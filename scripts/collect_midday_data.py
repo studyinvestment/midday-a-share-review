@@ -15,9 +15,22 @@
 
 用法：
   python collect_midday_data.py --date 2026-08-21
+  python collect_midday_data.py --selftest            # 离线自检落盘契约，不联网
+  python collect_midday_data.py --selftest-fail       # 失败档落盘契约自检
 """
 import json, re, ssl, socket, os, sys, urllib.request, urllib.parse, time, argparse
 from datetime import datetime
+
+# Windows 默认控制台编码为 GBK，打印中文易抛 UnicodeEncodeError。
+# 强制 stdout/stderr 用 UTF-8（Python 3.7+，3.13 必支持）。
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # 安全：恢复 TLS 证书校验（金融数据不建议关闭证书验证）。
 # 仅保留 IPv4 强制 + 备用域名降级（见 get()）。
@@ -352,6 +365,52 @@ def build_quality(DATE, snapshot, minutes, br, news, mode):
     return {"level": level, "errors": errors, "warnings": warnings}
 
 
+def save_outputs(OUT, br, DC):
+    """落盘合并 JSON + 单独涨跌家数文件。
+
+    成功 / 失败路径共用，确保「采集成功 → 文件必然写出」契约闭环，
+    杜绝旧版"打印完成但不写文件"导致下游读到旧文件/空文件的假成功。
+    """
+    path = f"midday_merged_{DC}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(OUT, f, ensure_ascii=False, indent=1)
+    if br:
+        bpath = f"breadth_{DC}.json"
+        with open(bpath, "w", encoding="utf-8") as f:
+            json.dump(br, f, ensure_ascii=False, indent=1)
+    return path
+
+
+def _run_selftest(DC, fail=False):
+    """离线自检：合成一份 v2 形态的 OUT，走真实 save_outputs 落盘路径。
+
+    用于回归测试"采集成功 / 失败后 midday_merged_{DC}.json 是否存在且含关键字段"，
+    不联网、秒级完成。直接复用正式落盘函数，确保测的是同一段代码。
+    """
+    level = "fail" if fail else "pass"
+    OUT = {
+        "snapshot": {"sh000001": {"price": 3000.0, "pct": 0.5, "prev_close": 2985.0}},
+        "minutes": {"sh000001": [{"t": "11:30", "p": 3000.0, "v": 1, "amt": 1}]},
+        "sector_industry": [], "sector_concept": [],
+        "zt_pool": [], "dt_pool": [],
+        "kline": {}, "fundflow": {}, "news": [],
+        "market_amount": {"sh_wan": 60000000, "sz_wan": 70000000, "total_yi": 13000.0},
+        "breadth": {"listed_total": 5901, "valid_total": 5543, "missing": 358,
+                    "up": 4544, "down": 550, "flat": 449,
+                    "up_ratio_valid": 0.82, "method": "selftest"},
+        "meta": {"schema_version": 2, "report_date": DC[:4] + "-" + DC[4:6] + "-" + DC[6:],
+                 "collected_at": "2026-08-24 11:30:00", "mode": "strict-midday",
+                 "as_of": "11:30"},
+        "quality": {"level": level, "errors": [], "warnings": []},
+        "sources": {"minutes": {"status": "ok", "as_of": "11:30", "coverage": "8/8"},
+                    "breadth": {"status": "ok", "as_of": "11:30", "listed_total": 5901},
+                    "news": {"status": "ok", "as_of": "11:30"}},
+    }
+    save_outputs(OUT, OUT["breadth"], DC)
+    print(f"[SELFTEST] wrote midday_merged_{DC}.json (quality={level})")
+    sys.exit(3 if fail else 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
@@ -360,9 +419,15 @@ def main():
                     help="运行模式；不传则按当前时刻自动判定（11:30-13:00→strict，其余→late）")
     ap.add_argument("--holdings", default=None,
                     help="持仓配置文件 JSON 路径；持仓为个人私有配置不随 Skill 分发，见 holdings.example.json")
+    ap.add_argument("--selftest", action="store_true",
+                    help="离线自检：合成 v2 数据并走真实落盘路径，不联网、不触发时间/日期闸门")
+    ap.add_argument("--selftest-fail", action="store_true",
+                    help="离线自检（失败档）：验证质量 fail 时仍落盘供排查")
     args = ap.parse_args()
     DATE = args.date
     DC = DATE.replace("-", "")
+    if args.selftest or args.selftest_fail:
+        _run_selftest(DC, fail=args.selftest_fail)
     MODE = args.mode or detect_mode()
     collected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"=== 午间复盘采集 {DATE} | 模式={MODE} ===")
@@ -461,9 +526,10 @@ def main():
     # 核心数据缺失 → 非零退出，不生成"伪完整"报告（仍落盘供排查）
     if q["level"] == "fail":
         print(f"\n[FAIL] 数据质量不达标，已终止生成。errors={q['errors']}")
-        with open(f"midday_merged_{DC}.json", "w", encoding="utf-8") as f:
-            json.dump(OUT, f, ensure_ascii=False, indent=1)
+        save_outputs(OUT, br, DC)
         sys.exit(3)
+    # 成功路径：落盘合并 JSON + 单独涨跌家数文件（供 generate 脚本 --breadth 使用）
+    save_outputs(OUT, br, DC)
     print(f"\n=== 完成 -> midday_merged_{DC}.json (quality={q['level']}, "
           f"warnings={len(q['warnings'])}) ===")
 
