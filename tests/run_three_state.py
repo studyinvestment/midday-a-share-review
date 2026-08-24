@@ -14,10 +14,21 @@
 """
 import json, os, re, subprocess, sys
 
+# Windows 默认控制台编码为 GBK，打印中文易抛 UnicodeEncodeError。
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEN = os.path.join(SKILL, "scripts", "generate_midday_review.py")
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-PY = r"C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+# 用当前解释器自身，避免写死绝对路径导致换机器直接失败
+PY = sys.executable
 
 # 每个工况：regime, date, 期望出现的关键文案, 期望的上涨占比(±容差)
 CASES = [
