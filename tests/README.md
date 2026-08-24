@@ -29,14 +29,35 @@ P2 把叙事从「写死结论」改成「按 `compute_facts()` 事实桶条件�
 ```bash
 cd tests
 python build_fixtures.py        # 如需重新生成夹具（依赖 workspace 真实 merged 作基底）
-python run_three_state.py       # 运行回归；全绿退出 0，任一失败退出 1
+python run_tests.py             # 一键跑全部回归（采集器落盘契约 + 三态渲染）；全绿退出 0
+# 或分开跑：
+python test_collector_contract.py   # 采集器落盘契约（成功/失败均必写文件 + v2 关键字段）
+python run_three_state.py           # 渲染器三态回归
 ```
+
+> Windows 注意：默认控制台编码为 GBK，中文输出易报 `UnicodeEncodeError`。
+> 各脚本已内置 `sys.stdout.reconfigure(encoding="utf-8")`，`run_tests.py` 也会注入
+> 环境变量 `PYTHONUTF8=1`。若单独运行仍报错，请显式加：
+> `set PYTHONUTF8=1 && python xxx.py`
 
 `run_three_state.py` 对每份夹具调用 `../scripts/generate_midday_review.py` 渲染，并断言：
 1. 进程退出码 = 0，HTML 正常生成；
 2. 各行情下 `breadth_regime` / `zt_regime` 对应的叙事文案分支**正确出现**；
 3. HTML 中「上涨占比 X%」与夹具注入宽度一致（容差 1%）；
 4. 额外用非周五日期（`2026-08-19`）跑一次分化夹具，验证 weekday 分支（隔夜外盘）。
+
+## 采集器落盘契约测试（test_collector_contract.py）
+
+针对 **2026-08-24 发现的 P0 bug**（采集成功路径只打印"完成"却不写文件，
+导致下游误以为采集成功、实际拿到旧文件/空文件）的回归锁。
+
+通过采集器的离线自检开关 `--selftest` / `--selftest-fail` 走**真实** `save_outputs`
+落盘代码（不联网、秒级），断言：
+- **成功路径**：退出码 0，且 `midday_merged_{DC}.json` 必然写出，并含 v2 关键字段
+  `quality`（含 `level`）/ `sources` / `meta`（含 `as_of`）/ `breadth`；
+- **失败路径**：退出码非 0，但文件**仍写出**（"仍落盘供排查"契约，不得静默丢失）。
+
+任何改采集器落盘逻辑的人，都必须先让本测试通过再合并。
 
 ## 维护
 
