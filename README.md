@@ -42,6 +42,24 @@ python generate_midday_review.py --date 2026-08-21 \
 - 采集器产出 `quality(level/errors/warnings)` + `sources(status/as_of)`；核心数据缺失→非零退出、不生成报告。
 - 涨跌家数分母用 `valid_total`（剔除无报价/停牌），非 `listed_total`。
 
+## 测试与质量门禁
+
+改动采集器或渲染器后，务必先跑回归再合并：
+
+```bash
+cd tests && python run_tests.py
+```
+
+- `test_collector_contract.py`：**采集器落盘契约**（针对 2026-08-24 P0 bug 的回归锁）。
+  通过离线 `--selftest` / `--selftest-fail` 走真实 `save_outputs` 落盘，断言
+  成功/失败两种结局下 `midday_merged_{DC}.json` 必然写出且含 v2 关键字段
+  （`quality` / `sources` / `meta.as_of` / `breadth`）。**这是自动化的假成功防线**。
+- `run_three_state.py`：渲染器三态回归（普涨/分化/普跌 + 工作日分支）。
+
+> **Windows UTF-8 兼容**：默认控制台为 GBK，中文输出易报 `UnicodeEncodeError`。
+> 各脚本已内置 `sys.stdout.reconfigure(encoding="utf-8")`，`run_tests.py` 也会注入
+> 环境变量 `PYTHONUTF8=1`。若单独运行仍报错：`set PYTHONUTF8=1 && python xxx.py`。
+
 ## 上传到 GitHub（仓库维护，非运行时依赖）
 `tools/deploy_to_github.py` 走 REST API 建仓+上传（自动排除 `holdings.json`），属维护工具，不随运行时 skill 加载：
 ```bash
