@@ -18,9 +18,25 @@
   python build_fixtures.py
 产物：tests/fixtures/{broad_rise,differentiation,broad_fall}_merged.json
 """
-import json, copy, os
+import json, copy, os, sys
 
-SRC = r"C:\Users\Administrator\WorkBuddy\automation-2026-07-29-17-17-17\midday_merged_20260821.json"
+# 结构基底来源：优先用环境变量 MIDDAY_BASE，其次在常见位置回退查找，
+# 避免写死绝对路径导致换机器直接失败。
+def _resolve_src():
+    env = os.environ.get("MIDDAY_BASE")
+    if env and os.path.exists(env):
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "midday_merged_20260821.json"),
+        r"C:\Users\Administrator\WorkBuddy\automation-2026-07-29-17-17-17\midday_merged_20260821.json",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
+
+SRC = _resolve_src()
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.join(HERE, "fixtures")
 os.makedirs(OUTDIR, exist_ok=True)
@@ -159,6 +175,12 @@ def build(regime):
 
 
 def main():
+    if not SRC or not os.path.exists(SRC):
+        sys.stderr.write(
+            "✗ 找不到结构基底 midday_merged_20260821.json。\n"
+            "  请先在某次真实采集后把它放到本目录上级，或设置环境变量 "
+            "MIDDAY_BASE 指向该文件，再运行 build_fixtures.py。\n")
+        sys.exit(2)
     for reg in ("broad_rise", "differentiation", "broad_fall"):
         out = build(reg)
         path = os.path.join(OUTDIR, f"{reg}_merged.json")
