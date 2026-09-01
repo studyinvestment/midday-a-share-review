@@ -1,0 +1,10 @@
+{
+ "listed_total": 5901,
+ "valid_total": 5543,
+ "missing": 358,
+ "up": 4544,
+ "down": 550,
+ "flat": 449,
+ "up_ratio_valid": 0.82,
+ "method": "selftest"
+}
