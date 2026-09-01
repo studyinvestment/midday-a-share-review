@@ -1,9 +1,9 @@
 ---
 name: midday-a-share-review
-description: 生成 A股午间复盘自包含 HTML 报告。固化 8 大模块结构（指数行情/走势叙事/板块TOP5/量能/资讯/涨停/持仓诊断/下午推演）、暗色渲染模板与中国配色。当 westock-mcp 与 tdx-connector 不可用时，自动降级到公开行情 API（腾讯财经 qt.gtimg.cn + 东方财富 push2/push2delay/push2ex）。适用于午间 12:00 定时复盘自动化，输出可直接推送手机端。
+description: 生成 A股午间复盘自包含 HTML 报告。固化 8 大模块结构（指数行情/走势叙事/板块TOP5/量能/资讯/涨停/持仓诊断/下午推演）、暗色渲染模板与中国配色。数据源四级降级链：westock-mcp / tdx-connector → hithink-finance MCP（同花顺）→ 腾讯财经 + 东方财富公开 API。适用于午间 12:00 定时复盘自动化，输出可直接推送手机端。
 metadata:
   agent_created: true
-  version: 2
+  version: 3
   trust: "时间一致性 / 数据可审计 / 叙事有条件"
 ---
 
@@ -15,7 +15,7 @@ metadata:
 ## 何时使用
 - 用户要求"午间复盘 / 午盘复盘 / 中午盘面总结"，或触发"午间早盘复盘"自动化。
 - 需要一份**自包含、无外部依赖**的 HTML（内联 SVG 分时图/条形图，CSS 暗色主题），便于推送与归档。
-- 当 westock-mcp / tdx-connector 不可用时，本 skill 已内置公开行情 API 降级方案，无需另行处理。
+- 当 westock-mcp / tdx-connector 不可用时，本 skill 已内置**四级降级链**（见下节），无需另行处理。
 
 ## 8 大模块结构（已固化，顺序不可随意变动）
 1. **上午主要指数行情** — 7 大指数表（上午收盘/涨跌幅/开盘/最高/最低/振幅/现价）+ 结构特征点评 + 各指数分时卡。
@@ -32,7 +32,8 @@ metadata:
 - **中国股市配色**：涨红 `#ef4444` / 跌绿 `#22c55e` / 平 `#94a3b8`。class 为 `up/down/flat`。
 - 所有图表为**内联 SVG**（分时 `spark()`、板块条形 `barchart()`），无 CDN/外部依赖。
 - 响应式：`@media(max-width:640px)` 已处理手机端。
-- 报告中**必须标注真实数据来源**（文末 `.src` 区块）——记录实际使用的公开行情接口，**不虚构 MCP/连接器状态**。
+- 报告中**必须标注真实数据来源**（文末 `.src` 区块）——记录实际使用的接口，**不虚构 MCP/连接器状态**。
+- **降级必须显式披露**：若 westock-mcp / tdx-connector 掉线而走了 hithink 或公开 API，报告内要用醒目提示写明「主数据源不可用，已降级至 X」，并列出降级后**哪些模块精度下降**（如：板块资金流缺失、概念板块只剩涨幅榜）。老板要靠这个判断结论可信度。
 
 ## 数据 schema（generate 脚本的输入契约）
 合并 JSON（`midday_merged_{date}.json`）需含：
@@ -54,14 +55,69 @@ sources         {minutes/breadth/news: {status, as_of, coverage?}}
 `{listed_total, valid_total, missing, up, down, flat, up_ratio_valid}`；
 `up_ratio` 以 `valid_total`（剔除无报价/停牌）为分母，不直接用 listed_total。
 
+## ⚠️ 先重试，再降级（v3.1，2026-09-01 血的教训）
+**MCP 掉线是「间歇性」的，不是「持续性」的。** 实测：12:05 采集时 westock-mcp + tdx-connector 同时断开，
+13:01 westock **自己恢复**。本期因此白跑约 40 分钟探测 + 少了一个模块。
+
+**正确顺序（务必遵守）：**
+1. 先调一次目标 MCP 做连通性探测（用最轻量的工具，如 `data_quote` 只传 1 个代码）
+2. 失败 → **等 3–5 分钟重试，最多 3 次**（大概率第 2 次就通）
+3. 3 次仍失败 → 才降级，并在报告中写明"已重试 3 次仍不可用"
+4. **降级后仍要回补**：报告发布后若有连接器恢复，用独立 patch 脚本回补缺失模块 + 做交叉复测
+   （参考 `patch_midday_20260901.py`：正则从原报告 HTML 提取数值 → 与新源对比 → 追加「复测校验」章节）
+
+## 数据源四级降级链（v3，2026-09-01 实战验证）
+MCP 连接器**会整条掉线**（westock-mcp / tdx-connector 同时不可用发生过）。按序尝试，成功即用：
+
+| 层级 | 数据源 | 覆盖 | 关键用法与坑 |
+|---|---|---|---|
+| 1 | **westock-mcp** | 全量，**含板块主力资金流（东财没有的）** | 首选。工具名 `mcp__westock-mcp__data_*`，直接调用参数会被序列化成 string 报 `Expected object` → **必须用 `DeferExecuteTool` 包装**。板块资金流：`data_sector(mode="ranking", kind="industry", type="mainNetInflow", order="desc")` 一次返回全部行业，字段 `mainNetInflow`/`mainNetInflow5d`/`mainNetInflow20d`/`upCount`/`leader`，**单位是万元** |
+| 2 | **tdx-connector** | 全量 | `tdx_quotes` 必须传 `code` + `setcode`（0=深A/1=沪A/33=基金）；深层查询用 `tdx_security_deep_info` 的 `entity_type="A股代码\|港股代码\|美股代码\|基金代码\|指数代码"`（不支持「ETF代码」「A股指数」这类值）。超大结果自动落 `tool-results/` |
+| 3 | **hithink-finance MCP（同花顺）** | A股/ETF/指数/行业指数，**不含可转债** | 见下方三条实测要点 |
+| 4 | **公开 API** | 腾讯财经（`qt.gtimg.cn` 快照含**可转债**、`web.ifzq.gtimg.cn` 日K/分时）+ 东财（`push2`/`push2ex`） | 见「采集管线 + 硬坑」 |
+
+### hithink-finance MCP 实测要点（v3 新增，务必保留）
+1. **指数快照要用 A股版**：`get_a_share_prices_snapshot` 传 `000001.SH,399001.SZ,399006.SZ,...`。
+   ⚠️ 传 index 版 `get_a_share_index_prices_snapshot` 且代码带 `.SH` → 报
+   `Structured content does not match the tool's output schema: data/data must be object`。
+2. **行业指数要用 index 版 + `.TI` 代码**：先 `get_a_share_index_catalog_ths_index_list(tag="industry")` 拿约 250 个 `.TI` 代码表，
+   再批量喂给 `get_a_share_index_prices_snapshot`（一次约 30 个）。`.TI` 代码在该工具下**正常工作**。
+   → 这是**拿真实领跌板块的最可靠途径**：东财板块榜只能拿到涨幅前 N，拿不到跌幅榜（见硬坑 3）。
+3. **不含可转债**：传任意沪/深转债（如 `sh113050`/`sz128101`）报同样的 schema 错。可转债走腾讯 `qt.gtimg.cn/q=sh113050,sz128101`，
+   返回 **GBK 编码**，需 `iconv -f GBK -t UTF-8`（或 Python `decode("gbk")`）。
+
 ## 采集管线（collect 脚本）+ 关键踩坑（务必保留）
 数据源：腾讯财经 `qt.gtimg.cn`（快照）、`web.ifzq.gtimg.cn`（分时/日K）、东方财富 `push2`/`push2delay`（板块/涨跌家数/资金流）、`push2ex`（涨停/跌停池）、东方财富要闻流。
 **三个硬坑（已固化进 collect 脚本，勿删）：**
 1. **东财 push2 的 IPv6 路由不通 → 强制 IPv4**：`socket.getaddrinfo` 覆写为 `AF_INET`，否则 `HTTP 000`。
 2. **`fs` 参数空格必须编码为 `+`**（用 `%20` 会被拒返回空响应）；用 `urllib.parse.quote(fs, safe="+")`。
-3. **大 `pz` 易被拒 → 分页 `pz<=100`**；并在 `push2.eastmoney.com` 与 `push2delay.eastmoney.com` 两 host 间兜底重试。
+3. **限流远比文档严重 → `pz<=90` 且只用第 1 页**：实测 `pz=200` 被拒、`pn>=2` 被拒、`po=0`（升序）被拒。
+   → 后果：**东财板块榜拿不到真实领跌板块**（总共 496 个行业/概念，只能拿到涨幅前 90）。
+   → 解法：**领跌板块改从 hithink 行业指数 `.TI` 全量拉取后在本地排序**（67 个行业指数足够覆盖），涨幅榜两者互为交叉验证。
+   在 `push2.eastmoney.com` 与 `push2delay.eastmoney.com` 两 host 间兜底重试。
 **涨跌家数**：用"全A逐页精确计数（pz=100）"，**不要用行业板块成分股求和**（跨层级重复计数不可靠）。
 **分时**：`minute/query` 返回的是**当日**数据（与传入 date 无关），故采集脚本必须在**交易日当天 12:00 前后**运行，不能回补历史。
+
+### Windows / 沙箱环境硬约束（v3 新增，踩过就别再踩）
+1. **Python 直连 DNS 会失败**（`socket.gaierror: [Errno 11001] getaddrinfo failed`），而 `curl` 子进程度假正常解析。
+   → **所有 HTTP 一律走 `subprocess.run(["curl","-s","-m","30",url,"-o",path])`**，不要 `urllib`/`requests`。
+   → 建议封装带指数退避的重试（实测 5 次重试可救回大部分东财限流）：
+   ```python
+   def curl(url, name, tries=5):
+       p = os.path.join(TMP, name)
+       for i in range(tries):
+           subprocess.run(["curl","-s","-m","30",url,"-o",p], check=False)
+           try:
+               with open(p, "r", encoding="utf-8") as f:
+                   j = json.load(f)
+               if j: return j
+           except Exception: pass
+           time.sleep(1.2 * (i + 1))
+       print(f"[FAIL] {name}"); return None
+   ```
+2. **`/tmp` 不可写**（`No such file or directory`）→ 临时数据落工作区 `.tmpdata/`，用完清理。
+3. **代理 127.0.0.1:7897 常被拒**（`WinError 10061`）且无 `HTTP_PROXY` 环境变量 → 不要依赖代理，直接 curl 直连反而通。
+4. **长采集脚本会撞前台超时** → 直接 `run_in_background=true` 起，用 TaskOutput 取回，别反复 sleep 轮询。
 
 ## 运行方式
 ```bash
@@ -114,6 +170,7 @@ python generate_midday_review.py --date 2026-08-21 \
     ```
   - 未提供时，报告"持仓诊断"模块显示占位提示，其余模块照常生成。
   - `holdings` 每行：`(代码, 名称, 成本)`，成本未知填 `null`/`None`（报告自动标注"成本未记录"并跳过浮亏率）。
+  - 代码前缀：`sh`/`sz` + 6 位。**可转债同样支持**（如 `sh113050`、`sz128101`），走腾讯 `qt.gtimg.cn` 取价；沪市可转债代码段为 `113xxx`/`110xxx`/`111xxx`，深市为 `128xxx`/`127xxx`/`123xxx`。
   - `hold_ctx`：每只持仓关联的"所属板块"名称（用于共振判断，如 `"钨"`/`"半导体"`；ETF/宽基填 `null`）。
   - `.gitignore` 已忽略 `holdings.json`，切勿误提交真实持仓。
 
@@ -126,3 +183,8 @@ python generate_midday_review.py --date 2026-08-21 \
 - 报告写入 `daily-review/午间复盘_{date}.html`。
 - 交付：使用**当前环境可用的文件交付能力**（WorkBuddy 用 `present_files` 并设 `cwd`；Codex 等其他环境按各自能力交付，不硬编码单一工具）。
 - 时间一致性：顶部 `.warn` 框按运行模式统一声明口径——`strict-midday` 全模块为上午基准；`late-snapshot` 仅指数"上午收"还原至 11:30，板块/广度/资讯/涨跌停标为"当前快照"。**禁止把午后数据标成"上午"**。
+
+## 变更记录
+- **v3.1（2026-09-01）**：新增「⚠️ 先重试，再降级」节 —— MCP 掉线是间歇性的（12:05 断、13:01 自愈），必须先探测+重试 3 次再降级，并给出降级后回补 + 交叉复测的 patch 脚本范式；westock 补充板块主力资金流用法与「单位万元」。
+- **v3（2026-09-01）**：新增「数据源四级降级链」+ hithink-finance MCP 实测要点（`.SH` 走 A股版 / `.TI` 走 index 版 / 不含可转债）；修正东财 `pz` 上限 `100→90` 且仅第 1 页可用，并给出「领跌板块改从 hithink 行业指数本地排序」的解法；新增 Windows/沙箱硬约束（Python DNS 失败走 curl、`/tmp` 不可写用 `.tmpdata/`、代理常被拒、长脚本后台跑）；新增降级披露红线；`holdings.json` 补充可转债代码段支持。
+- **v2**：时间一致性三模式（`strict-midday`/`late-snapshot`/`render-archive`）、数据质量闸门、事实层与条件叙事红线、持仓外置到 `holdings.json`。
