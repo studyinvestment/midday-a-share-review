@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
-"""三态夹具构造器（普涨 / 分化 / 普跌）。
+"""四态夹具构造器（普涨 / 分化 / 普跌 / 权重拖累）。
 
 以 workspace 中真实的 midday_merged_20260821.json 为「结构基底」，
-但做一次 v2 schema 校正后，再按三种市场状态注入受控的关键字段：
+但做一次 v2 schema 校正后，再按四种市场状态注入受控的关键字段：
   - breadth（v2：listed_total/valid_total/missing/up/down/flat）→ 决定 breadth_regime 三档
   - zt_pool（涨停家数 / 最高连板）→ 决定 zt_regime 三档
-  - sector 涨跌方向（仅普涨/普跌翻转符号）→ 决定 persist/资金主线分支
+  - sector 涨跌方向（普涨/普跌翻转符号）→ 决定 persist/资金主线分支
+  - snapshot+minutes 指数价格（weight_drag 翻转 7 大指数收跌）→
+    决定「指数方向 × 上涨占比」二维判定（2026-08-25 / 2026-09-02 两次实测修复的核心分支）
+
+四种形态覆盖矩阵（对应 SKILL.md「务必覆盖至少四种形态」）：
+  broad_rise       指数涨 + 个股普涨(82%)   → breadth strong / 同向走强
+  differentiation  分化震荡(46%)            → breadth neutral
+  broad_fall       指数跌 + 个股普跌(18%)   → breadth weak / 同步下行
+  weight_drag      指数跌 + 个股普涨(66%)   → breadth strong + 上证收跌 → 权重拖累型分化
 
 校正项（旧采集器 → 当前 generate 期望）：
   ① 类型纠正：sector.netflow/pct、zt.pct/streak 等由字符串转为 float/int
@@ -16,20 +24,21 @@
 
 用法：
   python build_fixtures.py
-产物：tests/fixtures/{broad_rise,differentiation,broad_fall}_merged.json
+产物：tests/fixtures/{broad_rise,differentiation,broad_fall,weight_drag}_merged.json
 """
 import json, copy, os, sys
 
-# 结构基底来源：优先用环境变量 MIDDAY_BASE，其次在常见位置回退查找，
-# 避免写死绝对路径导致换机器直接失败。
+# 结构基底来源：优先用环境变量 MIDDAY_BASE，其次回退到本仓库上层目录（skill 与采集数据
+# 平级放置时的布局）。刻意【不写死个人机器路径】（公开模板防泄漏）；本地重建夹具时用：
+#   MIDDAY_BASE="<某次真实采集的 midday_merged_*.json 路径>" python build_fixtures.py
 def _resolve_src():
     env = os.environ.get("MIDDAY_BASE")
     if env and os.path.exists(env):
         return env
     here = os.path.dirname(os.path.abspath(__file__))
+    # 相对回退仅覆盖"采集数据放在 skill 仓库上一级"这一种布局，其余一律走 MIDDAY_BASE
     candidates = [
         os.path.join(here, "..", "..", "midday_merged_20260821.json"),
-        r"C:\Users\Administrator\WorkBuddy\automation-2026-07-29-17-17-17\midday_merged_20260821.json",
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -42,6 +51,9 @@ OUTDIR = os.path.join(HERE, "fixtures")
 os.makedirs(OUTDIR, exist_ok=True)
 
 PRIVACY = ("sz002378", "sz002185", "sz159622")
+# 与 generate_midday_review.py 的 IDX 常量保持一致（7 大指数）
+IDX_CODES = ("sh000001", "sz399001", "sz399006", "sh000688", "sh000016",
+             "sh000905", "sh000852")
 STALE_KEYS = ("breadth_exact", "updown", "breadth_from_industry",
               "market_total_stocks", "top_gainers", "top_losers", "market_amount")
 
@@ -137,6 +149,35 @@ def flip_sectors(rows, regime):
     return out
 
 
+def flip_index_down(d, target=-0.006):
+    """把 7 大指数整体翻为收跌（权重拖累形态用）。
+
+    generate 的指数涨跌（IM[c]['am_pct']）由 minutes 末点价 ÷ snapshot.prev_close 计算，
+    故需同时缩放 minutes 价格与 snapshot 显示字段（price/open/high/low/pct），
+    保持日内相对形态不变、仅整体平移至目标跌幅。prev_close 不动（作分母基准）。
+    """
+    for c in IDX_CODES:
+        s = d.get("snapshot", {}).get(c)
+        ms = d.get("minutes", {}).get(c)
+        if not s or not ms:
+            continue
+        pc = s.get("prev_close") or 0
+        last_p = ms[-1].get("p") if ms else 0
+        if not pc or not last_p:
+            continue
+        scale = (pc * (1 + target)) / last_p
+        for m in ms:
+            if "p" in m:
+                m["p"] = round(m["p"] * scale, 3)
+        for k in ("price", "open", "high", "low"):
+            v = s.get(k)
+            if v:
+                s[k] = round(v * scale, 3)
+        if s.get("pct") is not None:
+            s["pct"] = round(target * 100, 2)
+    return d
+
+
 def make_zt(n, max_streak):
     pool = []
     for i in range(n):
@@ -166,6 +207,13 @@ def build(regime):
         d["sector_industry"] = flip_sectors(d["sector_industry"], regime)
         d["sector_concept"] = flip_sectors(d["sector_concept"], regime)
         d["zt_pool"] = make_zt(8, 2)             # weak
+    elif regime == "weight_drag":
+        # 权重拖累型：指数跌 + 个股普涨（2026-08-25 实测形态，二维判定修复的分支）
+        up, down, flat = 3660, 1700, 183         # 66.0% → breadth strong
+        d["breadth"] = v2_breadth(up, down, flat, valid, listed, missing)
+        d = flip_index_down(d)                   # 7 大指数翻为收跌
+        d["zt_pool"] = make_zt(40, 4)            # 中上活跃（非普涨日的涨停高峰）
+        # sector 保持真实混合：权重拖累日板块本就涨跌互现（由指数/宽度刻画结构）
     else:  # differentiation：保留真实混合板块与真实涨停池，仅注入受控中性宽度
         up, down, flat = 2550, 2900, 93          # 46.0% → neutral
         d["breadth"] = v2_breadth(up, down, flat, valid, listed, missing)
@@ -181,7 +229,7 @@ def main():
             "  请先在某次真实采集后把它放到本目录上级，或设置环境变量 "
             "MIDDAY_BASE 指向该文件，再运行 build_fixtures.py。\n")
         sys.exit(2)
-    for reg in ("broad_rise", "differentiation", "broad_fall"):
+    for reg in ("broad_rise", "differentiation", "broad_fall", "weight_drag"):
         out = build(reg)
         path = os.path.join(OUTDIR, f"{reg}_merged.json")
         json.dump(out, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
