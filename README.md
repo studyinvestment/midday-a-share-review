@@ -54,7 +54,9 @@ cd tests && python run_tests.py
   通过离线 `--selftest` / `--selftest-fail` 走真实 `save_outputs` 落盘，断言
   成功/失败两种结局下 `midday_merged_{DC}.json` 必然写出且含 v2 关键字段
   （`quality` / `sources` / `meta.as_of` / `breadth`）。**这是自动化的假成功防线**。
-- `run_three_state.py`：渲染器三态回归（普涨/分化/普跌 + 工作日分支）。
+- `run_three_state.py`：渲染器**四态**回归（普涨/分化/普跌/**权重拖累** + 工作日分支）。
+  权重拖累夹具（指数跌 + 66% 个股上涨）专测「指数方向 × 上涨占比」二维判定，
+  防止"指数跌但个股普涨"日输出"同向走强/普跌"等自相矛盾文案（2026-08-25 / 2026-09-02 两次实测修复）。
 
 > **Windows UTF-8 兼容**：默认控制台为 GBK，中文输出易报 `UnicodeEncodeError`。
 > 各脚本已内置 `sys.stdout.reconfigure(encoding="utf-8")`，`run_tests.py` 也会注入
