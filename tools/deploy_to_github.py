@@ -9,7 +9,7 @@
   - 走 GitHub REST API（api.github.com）创建仓库并上传文件，无需 git push，
     规避 github.com:443 上行 TLS 不稳的问题。
   - token 需有 repo 权限（classic PAT 勾选 repo；或 fine-grained 勾选 repository creation）。
-  - 自动排除 holdings.json / __pycache__（避免把个人真实持仓推到公开/共享仓库）。
+  - 自动排除 holdings.json / __pycache__ / *_review.html（个人持仓与测试运行时产物不入仓）。
   - 首次上传会在新仓库 main 分支创建初始提交。
 """
 import os, sys, json, base64, argparse, subprocess, urllib.request, urllib.error
@@ -19,7 +19,7 @@ API = "https://api.github.com"
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def api(method, path, token, body=None):
+def _api_urllib(method, path, token, body):
     url = API + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -32,6 +32,54 @@ def api(method, path, token, body=None):
             return r.read().decode("utf-8", "replace"), r.status
     except urllib.error.HTTPError as e:
         return e.read().decode("utf-8", "replace"), e.code
+
+
+def _api_curl(method, path, token, body):
+    """curl 子进程后端：Windows 沙箱内 Python 直连常 getaddrinfo failed（DNS），
+    curl 子进程却正常（见 SKILL.md「Windows/沙箱硬约束」）。body 经 stdin 传入，
+    响应体写临时文件，HTTP 状态码经 -w 取回。"""
+    import tempfile
+    url = API + path
+    fd, tmp = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    args = ["curl", "-s", "-m", "40", "-X", method, "-o", tmp, "-w", "%{http_code}",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Accept: application/vnd.github+json",
+            "-H", "Content-Type: application/json",
+            "-H", "User-Agent: midday-skill-deploy",
+            url]
+    try:
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            r = subprocess.run(args + ["--data-binary", "@-"], input=data,
+                               capture_output=True, timeout=90)
+        else:
+            r = subprocess.run(args, capture_output=True, timeout=90)
+        try:
+            code = int((r.stdout or b"0").decode("ascii", "replace").strip() or 0)
+        except ValueError:
+            code = 0
+        try:
+            with open(tmp, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except Exception:
+            content = ""
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    return content, code
+
+
+def api(method, path, token, body=None):
+    """统一入口：urllib 优先；若 DNS 直连失败（Windows 沙箱常见）自动降级 curl 后端。"""
+    try:
+        return _api_urllib(method, path, token, body)
+    except urllib.error.URLError as e:
+        if "getaddrinfo" in str(e) or "Name or service not known" in str(e):
+            return _api_curl(method, path, token, body)
+        raise
 
 
 def get_token(explicit):
@@ -58,6 +106,9 @@ def collect_files(root):
         dn[:] = [d for d in dn if d not in ("__pycache__", ".git")]
         for f in fn:
             if f == "holdings.json":
+                continue
+            # 测试运行时产物（run_three_state.py 每次重跑生成，.gitignore 亦忽略）
+            if f.endswith("_review.html"):
                 continue
             full = os.path.join(dp, f)
             rel = os.path.relpath(full, root).replace(os.sep, "/")
