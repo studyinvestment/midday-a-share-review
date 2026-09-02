@@ -88,10 +88,20 @@ def get(url, ref=None, retries=4, decode="utf-8"):
                                                          "Referer": ref or "https://finance.qq.com"})
                 with urllib.request.urlopen(req, timeout=25) as r:
                     raw = r.read()
-                try:
-                    return raw.decode(decode, errors="replace")
-                except Exception:
+                # 编码自适应：严格 utf-8 优先；失败或出现 U+FFFD 时退回 GBK。
+                # 背景：腾讯接口返回 GBK，若按 utf-8 + errors="replace" 解码不会抛异常，
+                # 只会静默把中文替换成 U+FFFD（不可恢复），曾导致证券名称全乱码。
+                if decode == "gbk":
                     return raw.decode("gbk", errors="replace")
+                try:
+                    txt = raw.decode("utf-8")  # 严格模式，失败说明不是 UTF-8
+                except UnicodeDecodeError:
+                    return raw.decode("gbk", errors="replace")
+                if "�" in txt:  # UTF-8 合法但含替换字符 → 多半是 GBK 被误判
+                    alt = raw.decode("gbk", errors="replace")
+                    if alt.count("�") < txt.count("�"):
+                        return alt
+                return txt
             except Exception as e:
                 if attempt == retries - 1 and host == hosts[-1]:
                     print(f"[FAIL] {u[:90]} -> {e}")
@@ -122,7 +132,10 @@ def parse_tencent(txt):
 
 def collect_snapshot():
     codes = ",".join([c for c, _ in INDEX_MAP] + [c for c, _, _ in HOLD])
-    return parse_tencent(get(f"https://qt.gtimg.cn/q={codes}"))
+    # 关键：腾讯 qt.gtimg.cn 返回 GBK，必须显式 decode="gbk"。
+    # 用默认 utf-8 + errors="replace" 不会抛异常（静默替换成 U+FFFD），
+    # 导致证券名称变成不可恢复的乱码（实测 2026-09-02 踩坑）。
+    return parse_tencent(get(f"https://qt.gtimg.cn/q={codes}", decode="gbk"))
 
 
 # ============ 2. 分时（腾讯，保留 0930-1130） ============
@@ -502,7 +515,7 @@ def main():
     print(f"[OK] 资讯 原始{len(raw_news)} → 过滤后{len(nw)} 条（模式={MODE}）")
 
     # 两市成交额
-    d = parse_tencent(get("https://qt.gtimg.cn/q=sh000001,sz399001"))
+    d = parse_tencent(get("https://qt.gtimg.cn/q=sh000001,sz399001", decode="gbk"))
     sh = d.get("sh000001", {}).get("amount_wan", 0)
     sz = d.get("sz399001", {}).get("amount_wan", 0)
     OUT["market_amount"] = {"sh_wan": sh, "sz_wan": sz, "total_yi": (sh + sz) / 1e4}
