@@ -3,7 +3,7 @@
 
 依次运行：
   1) test_collector_contract.py —— 采集器落盘契约（成功/失败均必写文件 + v2 关键字段）
-  2) run_three_state.py        —— 渲染器三态回归（普涨/分化/普跌 + 工作日分支）
+  2) run_three_state.py        —— 渲染器四态回归（普涨/分化/普跌/权重拖累 + 工作日分支）
 
 用法：
   python run_tests.py
