@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-"""三态回归测试 harness。
+"""四态回归测试 harness（文件名沿袭三态时期）。
 
-对三份夹具（普涨/分化/普跌）分别调用 generate_midday_review.py 渲染，
+对四份夹具（普涨/分化/普跌/权重拖累）分别调用 generate_midday_review.py 渲染，
 断言：
   1) 进程退出码 = 0，HTML 正常生成；
   2) 各行情下 breadth_regime / zt_regime 对应的叙事分支文案正确出现；
   3) HTML 中「上涨占比 X%」与夹具注入的宽度一致；
   4) 额外用非周五日期跑一次分化夹具，验证 weekday 分支（隔夜外盘）。
+
+weight_drag（指数跌 + 66% 个股上涨）覆盖「指数方向 × 上涨占比」二维判定：
+必须输出"个股普涨而指数承压 / 权重拖累型分化"，绝不能退化回
+"同向走强"或"普跌"表述（2026-08-25 / 2026-09-02 两次实测修复的分支）。
 
 用法：
   python run_three_state.py
@@ -44,6 +48,10 @@ CASES = [
      {"上午上涨主要由少数权重与主线拉动",  # breadth_regime = weak
       "赚钱效应显著恶化", "涨停结构脆弱"}, # zt_regime = weak
      18.0),
+    ("weight_drag", "2026-08-21",
+     {"个股普涨而指数承压",            # 指数跌 × 广度强：权重拖累（二维判定，缺陷11）
+      "权重拖累型分化"},               # 量价四分支：指数跌、个股涨（缺陷12）
+     66.0),
 ]
 # 额外：非周五日期验证 weekday 分支
 BONUS = ("differentiation", "2026-08-19", {"隔夜外盘不确定性"})
@@ -96,7 +104,7 @@ def main():
           f"期望文案存在={ok}")
     if not ok:
         all_ok = False
-    print("\n==== 三态回归结果:", "全部通过 ✅" if all_ok else "存在失败 ❌", "====")
+    print("\n==== 四态回归结果:", "全部通过 ✅" if all_ok else "存在失败 ❌", "====")
     sys.exit(0 if all_ok else 1)
 
 
