@@ -11,7 +11,7 @@
   python generate_midday_review.py --date 2026-08-21 \
       --merged midday_merged_20260821.json --breadth breadth_20260821.json
 """
-import json, html, os, argparse, datetime as _dt
+import json, html, os, re, argparse, datetime as _dt
 
 # ---------------- 配置（按需修改） ----------------
 IDX = [("sh000001", "上证指数"), ("sz399001", "深证成指"), ("sz399006", "创业板指"),
@@ -37,6 +37,9 @@ ap.add_argument("--merged", default=None)
 ap.add_argument("--breadth", default=None)
 ap.add_argument("--out", default=None)
 ap.add_argument("--narrative", default=None, help="可选：覆盖各模块文案的 JSON 路径")
+ap.add_argument("--mcp-note", default=None,
+                help="可选：MCP 数据源实际使用情况说明（写入文末「数据来源」）。"
+                     "未提供时用默认降级表述。")
 ap.add_argument("--holdings", default=None,
                 help="持仓配置文件 JSON 路径；持仓为个人私有配置不随 Skill 分发，见 holdings.example.json")
 args = ap.parse_args()
@@ -80,7 +83,30 @@ elif "breadth_exact" in D: BR = D["breadth_exact"]
 elif "updown" in D: BR = D["updown"]
 
 snap, mins, kl = D["snapshot"], D["minutes"], D["kline"]
-ind = D["sector_industry"]; con = D["sector_concept"]
+def _dedup_sectors(rows):
+    """东财行业板块含 Ⅰ/Ⅱ/Ⅲ 多级同名录入（如「地面兵装Ⅲ」与「地面兵装Ⅱ」），
+    会同时占据 TOP5 名额、把真实第二强板块挤出去（2026-09-02 实测）。
+    判定：去掉罗马数字后缀后重名，且 涨跌幅/主力净额/涨跌家数/龙头 全部一致 → 保留名称更短更常见的一个。
+    """
+    out, seen = [], {}
+    for r in rows:
+        base = re.sub(r"[ⅠⅡⅢⅣ]+$", "", (r.get("name") or "")).strip()
+        sig = (round(r.get("pct") or 0, 4), round((r.get("netflow") or 0) / 1e4, 2),
+               r.get("up"), r.get("down"), r.get("lead"))
+        key = (base, sig)
+        if key in seen:
+            prev = seen[key]
+            if len(r.get("name") or "") < len(prev.get("name") or ""):
+                out[out.index(prev)] = r
+                seen[key] = r
+            continue
+        seen[key] = r
+        out.append(r)
+    return out
+
+
+ind = _dedup_sectors(D["sector_industry"])
+con = _dedup_sectors(D["sector_concept"])
 zt, dt = D.get("zt_pool", []), D.get("dt_pool", [])
 news = D.get("news", [])
 ff = D.get("fundflow", {})
@@ -124,6 +150,36 @@ def vol_stat(code):
             "prev5": prev5, "dates": [x["date"] for x in k[-6:-1]]}
 
 VS = vol_stat("sh000001"); VZ = vol_stat("sz399001")
+
+
+def build_divergence_note():
+    """量价关系提示。原模板硬编码「指数涨、个股跌」，在指数下跌日会出现「涨 -2.18%」的语病
+    （2026-09-02 实测）。改为按创业板指实际方向选择措辞。"""
+    cyb = (IM.get("sz399006") or {}).get("am_pct")
+    if cyb is None:
+        return ""
+    # 「仅 X% 个股上涨」中的"仅"字只在低占比时成立；66% 说"仅"自相矛盾（2026-08-25 实测）。
+    up_word = f"仅 {up_ratio:.0f}%" if up_ratio < 45 else f"有 {up_ratio:.0f}%"
+    if cyb >= 0.3:
+        head = f"<b>量价背离提示：</b>创业板指涨 {abs(cyb):.2f}% 而量能未同步放大，同时<b>{up_word} 个股上涨</b>，"
+        body = ('构成"<b>指数涨、个股跌、量能平</b>"的结构性行情。')
+    elif cyb <= -0.3:
+        if up_ratio >= 55:
+            # 指数跌但个股普涨 —— 权重拖累，不是普跌
+            head = (f"<b>权重拖累型分化：</b>创业板指跌 {abs(cyb):.2f}%，但<b>有 {up_ratio:.0f}% 个股上涨</b>，"
+                    f"指数与个股方向相反。")
+            body = ('属于"<b>指数跌、个股涨、量能平</b>"的权重拖累形态——多数个股实为上涨，'
+                    '指数回落主要由少数权重股贡献，不应按普跌市处理。')
+        else:
+            head = (f"<b>量价同步走弱：</b>创业板指跌 {abs(cyb):.2f}%、量能亦未放大，同时<b>{up_word} 个股上涨</b>，"
+                    f"指数与个股同向走弱。")
+            body = ('属于"<b>指数跌、个股跌、量能平</b>"的普跌缩量形态。')
+    else:
+        head = f"<b>量价关系：</b>创业板指基本平收（{cyb:+.2f}%），量能未放大，<b>{up_word} 个股上涨</b>，"
+        body = ('属于"<b>指数平、个股弱、量能平</b>"的观望形态。')
+    return (head + body +
+            "该形态下，资金净流入居前的板块相对更具韧性，但<b>指数缺乏向上突破的动能</b>，"
+            "下午若量能仍不能放出，高位品种回落风险大于上行空间。<br>")
 am_amt_sh = (IM["sh000001"]["am_amt"] / 1e8) if IM.get("sh000001") else 0
 am_amt_sz = (IM["sz399001"]["am_amt"] / 1e8) if IM.get("sz399001") else 0
 am_amt_tot = am_amt_sh + am_amt_sz
@@ -181,12 +237,37 @@ for r in zt:
 zt_ind = sorted(ind_cnt.items(), key=lambda x: -x[1])[:8]
 
 # ================= 资讯筛选 =================
-KEY = ["财政部", "专项债", "贴息", "内需", "消费", "破产", "发改委", "民企", "民间投资",
-       "银监", "特别国债", "以旧换新", "临港", "研发", "恒大"]
+# 通用财经关键词（2026-09-02 重写）：原列表只覆盖某一天的特定事件（恒大/临港/以旧换新…），
+# 换一天几乎筛不出内容。改为按「货币 / 财政产业 / 宏观数据 / 监管市场 / 行业主题 / 公司业绩 / 外部」七类泛化。
+KEY = [
+    # 货币与流动性
+    "央行", "人民银行", "逆回购", "MLF", "LPR", "降准", "降息", "净投放", "净回笼",
+    "流动性", "资金面", "存款准备金", "社融", "信贷",
+    # 财政与产业政策
+    "财政部", "国债", "专项债", "税收", "减税", "发改委", "工信部", "商务部", "国资委",
+    "能源局", "政策", "规划", "部署", "方案", "试点", "两部门", "三部门",
+    # 宏观数据
+    "统计局", "PMI", "GDP", "CPI", "PPI", "进出口", "外贸", "用电量", "经济数据",
+    # 监管与市场
+    "证监会", "交易所", "IPO", "注册制", "退市", "回购", "增持", "减持",
+    "北交所", "科创板", "两融", "投资者",
+    # 行业主题
+    "人工智能", "算力", "芯片", "半导体", "集成电路", "新能源", "光伏", "储能", "电网",
+    "军工", "机器人", "医药", "医保", "集采", "汽车", "房地产", "楼市", "消费", "内需",
+    "稀土", "煤炭", "钢铁", "有色", "黄金", "原油", "农业", "种业",
+    # 公司与业绩
+    "业绩", "盈利", "净利", "中报", "年报", "预增", "预亏", "并购", "重组", "订单",
+    # 外部环境
+    "美联储", "美股", "纳斯达克", "人民币", "汇率", "关税", "贸易摩擦",
+]
+
+
 def pick(n):
     t = n.get("title") or ""
     return any(k in t for k in KEY)
-sel = [n for n in news if pick(n)][:16]
+
+
+sel = [n for n in news if pick(n)][:14]
 
 # ================= SVG 分时图 =================
 def spark(code, w=300, h=86, label=""):
@@ -276,12 +357,17 @@ def compute_facts():
     if m:
         hit = m.get("hi_t"); lot = m.get("lo_t")
         hi_first = bool(hit and lot and hit <= lot)
-        if hi_first and m.get("retrace", 0) > 0.8: pat = "rush_then_fall"
+        # 补 bounce：hi_first 只能说明"高点在低点之前"，无法区分「冲高回落」与「低开探底回升」
+        bounce_ = (m.get("am_pct", 0) or 0) - (m.get("lo_pct", 0) or 0)
+        if hi_first and bounce_ > 0.3: pat = "dip_then_rebound"
+        elif hi_first and m.get("retrace", 0) > 0.8: pat = "rush_then_fall"
         elif (not hi_first) and m.get("retrace", 0) > 0.8: pat = "dip_then_rebound"
         elif m.get("am_pct", 0) > 0.3: pat = "strong"
         else: pat = "weak"
+        _pat_cn = {"dip_then_rebound": "低开探底后回升", "rush_then_fall": "冲高回落",
+                   "strong": "单边走强", "weak": "弱势整理"}[pat]
         F["index_pattern"] = {"value": pat,
-                              "metric": f"上证{('冲高' if hi_first else '探低')}后回落{m.get('retrace',0):.2f}pct",
+                              "metric": f"上证{_pat_cn}：自高点{m.get('retrace',0):.2f}pct、自低点{bounce_:+.2f}pct",
                               "threshold": "冲高回落/探低回升/单边", "missing": False, "kind": "fact"}
     else:
         F["index_pattern"] = {"missing": True, "kind": "fact"}
@@ -333,20 +419,38 @@ def build_s01_note():
     kc_name = next((n for c, n in IDX if c == 'sh000688'), '科创50')
     s = f"<b>结构特征：{'全线低开' if n_down>=5 else ('多数低开' if n_down>=4 else '开盘分化')}。</b>"
     s += f"{len(opens)} 大指数中 {n_down} 只低开、{n_up} 只高开；"
-    s += f"风格上<b>{esc(strong[1])} {strong[2]['am_pct']:+.2f}%</b>领涨，<b>{esc(weak[1])} {weak[2]['am_pct']:+.2f}%</b>最弱。"
-    if kc and kc['retrace'] > 0.8:
-        s += (f"<b>需留意 {esc(kc_name)} 的日内回吐</b>：盘中冲高 {kc['hi_pct']:+.2f}% 后回落至 "
+    # 全部收跌时说"领涨"会误导，改"相对抗跌"（2026-09-02 修正）
+    strong_word = "相对抗跌" if strong[2]['am_pct'] < 0 else "领涨"
+    weak_word = "领跌" if weak[2]['am_pct'] < 0 else "最弱"
+    s += f"风格上<b>{esc(strong[1])} {strong[2]['am_pct']:+.2f}%</b>{strong_word}，<b>{esc(weak[1])} {weak[2]['am_pct']:+.2f}%</b>{weak_word}。"
+    # 只有「先冲高、后回落」才叫回吐；若高点在低点之后（V 型回升）则应描述为修复
+    if kc and kc['retrace'] > 0.8 and kc['hi_t'] < kc['lo_t']:
+        # 「冲高 -0.10%」是语病：高点仍为负时不能叫冲高（2026-08-24 实测）
+        _hiw = (f"盘中最高仅 {kc['hi_pct']:+.2f}%" if kc['hi_pct'] < 0
+                else f"盘中冲高 {kc['hi_pct']:+.2f}%")
+        s += (f"<b>需留意 {esc(kc_name)} 的日内回吐</b>：{_hiw}后回落至 "
               f"{kc['am_pct']:+.2f}%，回落 {kc['retrace']:.2f} 个百分点，为全场最弱的日内动能表现。")
+    elif kc and kc['hi_t'] > kc['lo_t'] and (kc['am_pct'] - kc['lo_pct']) > 0.8:
+        s += (f"<b>{esc(kc_name)} 呈探底回升</b>：{kc['lo_t'][:2]}:{kc['lo_t'][2:]} 下探 {kc['lo_pct']:+.2f}% 后"
+              f"一路上行至 {kc['hi_t'][:2]}:{kc['hi_t'][2:]} 的 {kc['hi_pct']:+.2f}%，"
+              f"自低点修复 {kc['am_pct'] - kc['lo_pct']:.2f} 个百分点，是全场日内动能最强的指数。")
     if mc and m1 and mc['am_pct'] < 0 and m1['am_pct'] < 0:
         s += f"<b>中小盘走弱</b>——中证500 {mc['am_pct']:+.2f}%、中证1000 {m1['am_pct']:+.2f}% 双双收跌。"
-    # 宽度联动：是否全面行情由 breadth_regime 判定，不硬编码结论
+    # 宽度联动：必须「指数方向 × 广度」二维判定。
+    # 只按 breadth_regime 一维判断会漏掉「指数跌、个股普涨」的权重拖累日，
+    # 2026-08-25 就因此输出了"指数与多数个股同向走强"（当天 7 大指数全绿）。
     br = FACTS.get("breadth_regime", {})
+    _sh = (IM.get("sh000001") or {}).get("am_pct")
     if br.get("missing"):
         s += "（涨跌家数暂缺，指数与个股宽度的关系待补全数据后判断。）"
     elif br["value"] == "weak":
         s += "指数分化 + 多数个股下跌，<b>上午上涨主要由少数权重与主线拉动，而非全面性行情</b>（详见第 4 节涨跌家数）。"
     elif br["value"] == "neutral":
         s += "指数分化与个股涨跌大致相当，行情结构偏均衡，主线与补涨并存。"
+    elif _sh is not None and _sh < -0.1:
+        # 广度强但指数跌 —— 典型权重拖累 / 高低切换
+        s += (f"<b>个股普涨而指数承压</b>——上涨占比达 {up_ratio:.1f}%，但上证 {_sh:+.2f}% 收跌，"
+              "呈现典型的<b>权重股拖累、中小盘活跃</b>的高低切换特征（详见第 4 节涨跌家数）。")
     else:
         s += "指数与多数个股同向走强，行情具备一定广度支撑。"
     return s
@@ -360,13 +464,28 @@ def build_s02():
     up_drv = sorted([r for r in ind_v if (r.get("netflow") or 0) > 0], key=lambda r: -(r.get("netflow") or 0))
     dn_drv = sorted([r for r in ind_v if (r.get("netflow") or 0) < 0], key=lambda r: (r.get("netflow") or 0))
     hi_first = hit <= lot
+    # 形态三分支（2026-09-02 修正）：仅用 hi_first 会把「低开→探底→回升」误判为「冲高回落」。
+    # 关键补一个 bounce（收盘相对日内低点的回升幅度）。
+    bounce = cp - lo
     blk = []
     blk.append(("09:30–09:40<br><span class='chip'>开盘</span>",
         f"<b>上证{op:+.2f}%开盘（{m['open']:.2f}），沪深两市{'低开' if op<0 else '高开'}。</b>"
-        + (f"开盘后短暂下探至上午最低 {m['low']:.2f}（{lo:+.2f}%）。" if op < 0
-           else f"开盘后短暂冲高至 {m['high']:.2f}（{hi:+.2f}%）。")
+        + (f"开盘即为上午最高点 {m['high']:.2f}（{hi:+.2f}%），其后单边下行。" if hi == op
+           else (f"开盘后短暂下探至上午最低 {m['low']:.2f}（{lo:+.2f}%）。" if op < 0
+                 else f"开盘后短暂冲高至 {m['high']:.2f}（{hi:+.2f}%）。"))
         + "情绪面承接前收盘态势，早盘方向由主线板块决定。"))
-    if hi_first:
+    if hi_first and bounce > 0.3:
+        # 低开 → 探底 → 回升（V 型）
+        blk.append((f"09:30–{lot[:2]}:{lot[2:]}<br><span class='chip'>下探</span>",
+            f"<b>低开后延续弱势单边下探。</b>上证 {lot[:2]}:{lot[2:]} 触及上午低点 {m['low']:.2f}（{lo:+.2f}%），"
+            f"自开盘价回落 {op - lo:.2f} 个百分点，为上午跌幅最深时段；"
+            f"净流出居前的板块（{('、'.join(esc(r['name']) for r in dn_drv[:3]) or '无明显集中流出')}）与指数下行同时出现。"))
+        blk.append((f"{lot[:2]}:{lot[2:]}–11:30<br><span class='chip'>回升</span>",
+            f"<b>探底后跌幅持续收敛。</b>上证自低点回升 {bounce:.2f} 个百分点至 {m['am_close']:.2f}（{cp:+.2f}%），"
+            f"但仍未收复昨收（距平盘 {abs(cp):.2f}pct）；"
+            f"资金净流入居前的板块（{('、'.join(esc(r['name']) for r in up_drv[:3]) or '无明显主线')}）与指数回升同时出现，"
+            "回升属相关性观察，是否形成日内反转需以下午量能验证。"))
+    elif hi_first:
         blk.append(("早盘<br><span class='chip'>冲高</span>",
             f"<b>资金净流入居前的板块（{('、'.join(esc(r['name']) for r in up_drv[:3]) or '无明显主线')}）带动指数快速拉升。</b>"
             f"上证 {hit[:2]}:{hit[2:]} 触及上午高点 {m['high']:.2f}（{hi:+.2f}%）"
@@ -382,9 +501,10 @@ def build_s02():
             f"<b>部分板块发力，指数反弹冲高。</b>上证 {hit[:2]}:{hit[2:]} 摸高 {m['high']:.2f}（{hi:+.2f}%），"
             "但量能未能跟进，尾盘再度回落。"))
     blk.append(("11:15–11:30<br><span class='chip'>尾盘</span>",
-        f"<b>窄幅整理收官。</b>上证最终收 {m['am_close']:.2f}（{cp:+.2f}%）"
-        + (f"，自高点回落 {m['retrace']:.2f} 个百分点。" if m['retrace'] > 0.05 else "，基本守住日内高位。")
-        + "多空分歧显著，为下午留出双向空间。"))
+        f"<b>{'低位回升后' if (hi_first and bounce > 0.3) else '窄幅整理'}收官。</b>上证最终收 {m['am_close']:.2f}（{cp:+.2f}%）"
+        + (f"，自高点回落 {m['retrace']:.2f} 个百分点" + (f"、自低点回升 {bounce:.2f} 个百分点" if bounce > 0.05 else "")
+           if m['retrace'] > 0.05 else "，基本守住日内高位。")
+        + "。多空分歧显著，为下午留出双向空间。"))
     blk.append(("主线<br><span class='chip'>资金</span>",
         f"<b>资金主线：</b>净流入居前——{fmt_drv(up_drv)}；净流出居前——{fmt_drv(dn_drv)}。"
         "上涨由少数主线拉动而非全面行情（详见第4节涨跌家数）。"))
@@ -410,15 +530,59 @@ def build_s03_note():
               f"但指数仅 {cpo['pct']:+.2f}%，高位承接不足，下午重点观察能否重新走强。")
     return s
 
+# 影响映射（2026-09-02 重写为通用版）：匹配按顺序取首个命中，
+# 因此「具体词条」必须排在「泛化词」之前（如"降准"先于"央行"，"净回笼"先于"流动性"）。
 IMPACT = {
-    "财政部": ("宏观/顺周期", "偏多", "imp-pos"), "专项债": ("基建/建材", "偏多", "imp-pos"),
-    "贴息": ("消费/银行/中小微", "偏多", "imp-pos"), "内需": ("消费", "偏多", "imp-pos"),
-    "消费": ("消费", "偏多", "imp-pos"), "以旧换新": ("家电/汽车", "偏多", "imp-pos"),
-    "特别国债": ("基建/银行", "偏多", "imp-pos"), "破产": ("地产链", "偏空", "imp-neg"),
-    "发改委": ("民营/成长", "偏多", "imp-pos"), "民企": ("民营/成长", "偏多", "imp-pos"),
-    "民间投资": ("民营/成长", "偏多", "imp-pos"), "银监": ("银行/非银", "中性", "imp-neu"),
-    "临港": ("上海本地/制造", "偏多", "imp-pos"), "耕地": ("农业", "中性", "imp-neu"),
-    "研发": ("科技成长", "偏多", "imp-pos"), "恒大": ("地产链", "偏空", "imp-neg"),
+    # —— 货币流动性：方向由操作方向决定 ——
+    "降准": ("银行/地产/券商", "偏多", "imp-pos"), "降息": ("银行/地产/成长", "偏多", "imp-pos"),
+    "净投放": ("宏观流动性", "偏多", "imp-pos"), "净回笼": ("宏观流动性", "偏空", "imp-neg"),
+    "MLF": ("宏观流动性", "中性", "imp-neu"), "LPR": ("银行/地产", "中性", "imp-neu"),
+    "逆回购": ("宏观流动性", "中性", "imp-neu"), "央行": ("宏观流动性", "中性", "imp-neu"),
+    "人民银行": ("宏观流动性", "中性", "imp-neu"),
+    "流动性": ("宏观流动性", "中性", "imp-neu"), "资金面": ("宏观流动性", "中性", "imp-neu"),
+    # —— 财政与产业政策 ——
+    "专项债": ("基建/建材", "偏多", "imp-pos"), "国债": ("基建/银行", "偏多", "imp-pos"),
+    "减税": ("全市场", "偏多", "imp-pos"), "税收": ("全市场", "中性", "imp-neu"),
+    "财政部": ("宏观/顺周期", "偏多", "imp-pos"),
+    "能源局": ("电力设备/电网", "偏多", "imp-pos"), "电网": ("电力设备/电网", "偏多", "imp-pos"),
+    "工信部": ("制造/科技", "偏多", "imp-pos"), "发改委": ("基建/产业", "偏多", "imp-pos"),
+    "商务部": ("消费/外贸", "偏多", "imp-pos"), "国资委": ("国企改革", "偏多", "imp-pos"),
+    "人工智能": ("科技成长/算力", "偏多", "imp-pos"), "算力": ("科技成长/算力", "偏多", "imp-pos"),
+    "政策": ("产业政策", "中性", "imp-neu"), "规划": ("产业政策", "中性", "imp-neu"),
+    "部署": ("产业政策", "中性", "imp-neu"), "方案": ("产业政策", "中性", "imp-neu"),
+    # —— 宏观数据 ——
+    "统计局": ("宏观/顺周期", "中性", "imp-neu"), "PMI": ("宏观/顺周期", "中性", "imp-neu"),
+    "GDP": ("宏观/顺周期", "中性", "imp-neu"), "CPI": ("消费/通胀", "中性", "imp-neu"),
+    "PPI": ("周期/资源", "中性", "imp-neu"), "社融": ("银行/宏观", "中性", "imp-neu"),
+    "进出口": ("出口链", "中性", "imp-neu"), "外贸": ("出口链", "中性", "imp-neu"),
+    # —— 监管与市场 ——
+    "IPO": ("券商/次新", "中性", "imp-neu"), "注册制": ("券商/成长", "中性", "imp-neu"),
+    "退市": ("绩差/ST", "偏空", "imp-neg"), "证监会": ("券商/市场", "中性", "imp-neu"),
+    "北交所": ("券商/中小盘", "中性", "imp-neu"), "两融": ("券商/市场", "中性", "imp-neu"),
+    "回购": ("相关个股", "偏多", "imp-pos"), "增持": ("相关个股", "偏多", "imp-pos"),
+    "减持": ("相关个股", "偏空", "imp-neg"),
+    # —— 行业主题 ——
+    "芯片": ("半导体", "偏多", "imp-pos"), "半导体": ("半导体", "偏多", "imp-pos"),
+    "集成电路": ("半导体", "偏多", "imp-pos"), "机器人": ("机器人/自动化", "偏多", "imp-pos"),
+    "光伏": ("新能源", "偏多", "imp-pos"), "储能": ("新能源", "偏多", "imp-pos"),
+    "新能源": ("新能源", "偏多", "imp-pos"), "军工": ("军工装备", "偏多", "imp-pos"),
+    "医保": ("医药", "中性", "imp-neu"), "集采": ("医药", "偏空", "imp-neg"),
+    "医药": ("医药", "中性", "imp-neu"), "汽车": ("汽车链", "中性", "imp-neu"),
+    "房地产": ("地产链", "中性", "imp-neu"), "楼市": ("地产链", "中性", "imp-neu"),
+    "消费": ("消费", "偏多", "imp-pos"), "内需": ("消费", "偏多", "imp-pos"),
+    "稀土": ("小金属/稀土", "中性", "imp-neu"), "煤炭": ("煤炭", "中性", "imp-neu"),
+    "钢铁": ("钢铁", "中性", "imp-neu"), "有色": ("有色金属", "中性", "imp-neu"),
+    "黄金": ("贵金属", "中性", "imp-neu"), "原油": ("石化", "中性", "imp-neu"),
+    "种业": ("农业", "中性", "imp-neu"), "农业": ("农业", "中性", "imp-neu"),
+    # —— 公司业绩 ——
+    "预增": ("相关个股", "偏多", "imp-pos"), "预亏": ("相关个股", "偏空", "imp-neg"),
+    "并购": ("相关个股", "偏多", "imp-pos"), "重组": ("相关个股", "偏多", "imp-pos"),
+    "业绩": ("相关个股", "中性", "imp-neu"), "盈利": ("全市场", "中性", "imp-neu"),
+    # —— 外部环境 ——
+    "美联储": ("外部风险", "中性", "imp-neu"), "美股": ("外部风险", "中性", "imp-neu"),
+    "纳斯达克": ("外部风险", "中性", "imp-neu"), "人民币": ("汇率/出口", "中性", "imp-neu"),
+    "汇率": ("汇率/出口", "中性", "imp-neu"), "关税": ("出口链", "偏空", "imp-neg"),
+    "贸易摩擦": ("出口链", "偏空", "imp-neg"),
 }
 
 def build_s05_note():
@@ -430,9 +594,14 @@ def build_s05_note():
             if k_ in t:
                 sect, view, klass = v; break
         groups.setdefault(sect, []).append(t)
-    core = [n.get("title") for n in sel if any(k in (n.get("title") or "")
-            for k in ["财政部", "贴息", "专项债", "特别国债", "破产", "恒大", "以旧换新"])]
-    s = "<b>核心事件：</b>" + ("；".join(esc(c) for c in core[:4]) if core else "上午无重大宏观催化。")
+    # 「重大宏观催化」判定泛化（2026-09-02 修正）：原列表只认某一天的特定事件（恒大/临港/以旧换新…），
+    # 换一天恒定输出「上午无重大宏观催化」，与表格里 14 条资讯自相矛盾。
+    CORE_KEY = ["财政部", "专项债", "特别国债", "贴息", "以旧换新", "降准", "降息", "LPR",
+                "净投放", "净回笼", "央行", "人民银行", "发改委", "国务院", "统计局", "证监会",
+                "关税", "贸易摩擦", "美联储", "PMI", "GDP", "社融", "两会", "中央经济工作会议"]
+    core = [n.get("title") for n in sel if any(k in (n.get("title") or "") for k in CORE_KEY)]
+    s = "<b>核心事件：</b>" + ("；".join(esc(c) for c in core[:4]) if core
+                              else "筛选出的资讯中未出现央行/财政/统计口径的重大宏观事件，上午以行业与监管类信息为主。")
     s += "<br><b>影响分布：</b>" + "、".join(f"{esc(k)}（{len(v)}条）" for k, v in list(groups.items())[:6])
     topc = sorted(con_v, key=lambda r: -(r.get("netflow") or 0))[:1]
     rank_map = {r["name"]: i + 1 for i, r in
@@ -449,8 +618,19 @@ def build_s06_note():
     top_name = next((r['name'] for r in multi if r.get('streak') == top_streak), "—")
     s = (f"<b>情绪判读：赚钱效应{'显著恶化' if up_ratio < 40 else ('一般' if up_ratio < 55 else '尚可')}，"
          f"涨停结构{'脆弱' if top_streak <= 3 else '尚可'}。</b>")
-    s += (f"① <b>市场宽度极差</b>——全市场 {BR_tot} 只标的中仅 <b>{BR_up} 只上涨（{up_ratio:.1f}%）</b>，{BR_dn} 只下跌，"
-          "指数与个股严重背离，普通持仓体验远差于指数表现；")
+    # 「背离」只在指数与个股方向相反时才成立；同跌应叫「同步走弱」（2026-09-02 修正）
+    _sh_pct = (IM.get("sh000001") or {}).get("am_pct")
+    if _sh_pct is not None and _sh_pct < -0.3 and up_ratio < 40:
+        _rel = "指数与个股同步走弱，缺少逆势赚钱效应"
+    elif _sh_pct is not None and _sh_pct > 0.3 and up_ratio < 40:
+        _rel = "指数与个股严重背离，普通持仓体验远差于指数表现"
+    else:
+        _rel = "指数与个股方向大体一致"
+    # "仅 X 只上涨"在 X 占比过半时不成立（2026-08-25：3684 只上涨 / 66.4% 却写"仅"）
+    _upw = "仅" if up_ratio < 45 else "有"
+    s += (f"① <b>市场宽度{'极差' if up_ratio < 40 else ('一般' if up_ratio < 55 else '良好')}</b>"
+          f"——全市场 {BR_tot} 只标的中{_upw} <b>{BR_up} 只上涨（{up_ratio:.1f}%）</b>，"
+          f"{BR_dn} 只下跌，{_rel}；")
     s += (f"② <b>连板高度{'极低' if top_streak <= 3 else '中等'}</b>——最高仅 <b>{top_streak} 板</b>（{esc(top_name)}），"
           f"2 板 {streaks.get(2,0)} 只，首板 {streaks.get(1,0)} 只，缺乏高标引领，题材空间被压缩；")
     if zt_ind:
@@ -483,8 +663,23 @@ def build_s07_note():
 def build_s08():
     risks = []; opps = []
     # 宽度风险（数据驱动标签，去"极差"主观化 → "偏弱"）
-    risks.append(("高", "l-h", f"<b>市场宽度偏弱，\"指数红、账户绿\"风险。</b>仅 {up_ratio:.1f}%（{BR_up}/{BR_tot}）个股上涨，"
-                  f"{BR_dn} 只下跌。赚钱效应集中在少数主线，追高非主线品种胜率低。"))
+    # 宽度风险需「指数方向 × 上涨占比」二维判定（2026-09-02 / 2026-08-25 两次实测修正）：
+    # 指数跌+个股普涨 既不是"指数红账户绿"，也不是"同步下行"，而是权重拖累。
+    _sh = (IM.get("sh000001") or {}).get("am_pct")
+    _upw = "仅" if up_ratio < 45 else "有"
+    if _sh is not None and _sh > 0.05:
+        _w_ttl = "市场宽度偏弱，\"指数红、账户绿\"风险"
+        _w_bd = f"赚钱效应集中在少数主线，追高非主线品种胜率低。"
+    elif up_ratio >= 55:
+        _w_ttl = f"指数承压而个股普涨，存在权重股补跌拖累指数的风险"
+        _w_bd = (f"上证 {_sh:+.2f}% 收跌但多数个股上涨，说明回落集中在权重股；"
+                 f"若下午权重股跌势扩散，前期抗跌的中小盘存在补跌可能。")
+    else:
+        _w_ttl = f"市场宽度偏弱，指数（上证 {_sh:+.2f}%）与个股同步下行"
+        _w_bd = f"赚钱效应集中在少数主线，追高非主线品种胜率低。"
+    risks.append(("高" if up_ratio < 55 else "中", "l-h" if up_ratio < 55 else "l-m",
+                  f"<b>{_w_ttl}。</b>{_upw} {up_ratio:.1f}%（{BR_up}/{BR_tot}）个股上涨，"
+                  f"{BR_dn} 只下跌。{_w_bd}"))
     # 高位回落板块补跌压力（仅陈述事实 + 条件）
     for c, nm in [("sh000688", "科创50"), ("sz399006", "创业板指")]:
         mm = IM.get(c)
@@ -522,8 +717,14 @@ def build_s08():
                      + "，三项指标全部为正；能否延续以下午量能与资金面为准。"))
     topc = sorted(con_v, key=lambda r: -(r.get("netflow") or 0))[:1]
     if topc and (topc[0].get("netflow") or 0) > 0:
+        # 「高位分歧」仅在指数自高点明显回落时成立；低开探底回升日应表述为「跟随指数修复」（2026-09-02 修正）
+        _shm = IM.get("sh000001") or {}
+        if _shm.get("hi_t") and _shm.get("lo_t") and _shm["hi_t"] <= _shm["lo_t"] and _shm.get("retrace", 0) > 0.8:
+            _div = "但指数自高点回落，显示高位分歧"
+        else:
+            _div = "但指数尚未收复昨收，主线能否带动指数修复仍待验证"
         opps.append(("中", "l-m", f"<b>{esc(topc[0]['name'])} 资金相对集中，需等分歧修复。</b>主力净流入 {(topc[0].get('netflow') or 0)/1e8:+.1f}亿，"
-                      "但指数冲高回落显示高位分歧；若下午重新放量走强则主线确认。"))
+                      f"{_div}；若下午重新放量走强则主线确认。"))
     # 支撑位（去"下方空间有限"因果，改为参考位）
     opps.append(("中", "l-m", f"<b>上证 {IM['sh000001']['low']:.2f} 为日内明确低点参考。</b>上午最低获支撑后收回，"
                  "该位可视为震荡格局下的支撑参考，跌破则打开下方空间，需密切观察。"))
@@ -562,12 +763,23 @@ def build_hold_note(code, name, cost, m, fl, secr):
     if m["am_pct"] > 1.5: label = "上午最强持仓"
     elif m["am_pct"] < -1.5: label = "上午最弱持仓"
     else: label = "上午震荡持仓"
-    shape = ("单边走高" if m["am_pct"] > 0.5 else ("冲高回落" if m["retrace"] > 0.8 else "窄幅整理"))
+    # 形态需区分「冲高回落」与「下探后回升（V型）」：
+    # 仅看 retrace 会把「低开→探底→回升」误判成「冲高回落」（2026-09-02 实测踩坑）。
+    bounce = m["am_pct"] - m["lo_pct"]          # 自日内低点回升幅度（百分点）
+    if m["am_pct"] > 0.5 and m["retrace"] < 0.5:
+        shape = "单边走高"
+    elif bounce > 0.5 and m["retrace"] > 0.8:
+        shape = "先抑后扬（V 型）"
+    elif m["retrace"] > 0.8:
+        shape = "冲高回落"
+    else:
+        shape = "窄幅整理"
     # 开盘方式条件化（去固定"平开后"）
     op = m["open_pct"]
     open_word = "平开后" if abs(op) < 0.15 else ("高开后" if op > 0 else "低开后")
     parts.append(f"<b>{label}。</b>{open_word}{shape}，{m['hi_t'][:2]}:{m['hi_t'][2:]} 触及日内高点 {m['high']:.2f}（{m['hi_pct']:+.2f}%），"
-                 f"11:30 收 {m['am_close']:.2f}（{m['am_pct']:+.2f}%），自高点回落 {m['retrace']:.2f}%。")
+                 f"{m['lo_t'][:2]}:{m['lo_t'][2:]} 下探日内低点 {m['low']:.2f}（{m['lo_pct']:+.2f}%），"
+                 f"11:30 收 {m['am_close']:.2f}（{m['am_pct']:+.2f}%），自高点回落 {m['retrace']:.2f}%、自低点回升 {bounce:.2f}%。")
     if secr:
         ld = (f"，龙头{esc(secr['lead'])} {secr['lead_pct']:+.2f}%" if (secr.get('lead_pct') or 0) >= 5 else "")
         parts.append(f"所属<b>{esc(secr['name'])}板块 {secr['pct']:+.2f}%（主力{(secr.get('netflow') or 0)/1e8:+.2f}亿，"
@@ -599,8 +811,12 @@ def build_hold_note(code, name, cost, m, fl, secr):
         parts.append("<b>操作</b>：板块强度居前且主力净流入，可持有；若冲高未能有效放量突破，可考虑减仓做T降低成本。")
     elif fl and fl['main'] < 0:
         parts.append("<b>操作</b>：反弹至日内高点区建议减仓；若跌破日内低点则短线止损，不宜在主力流出背景下补仓摊薄。")
+    elif fl and fl['main'] > 0:
+        # 主力净流入：原模板此处误写「主力净流出背景下不宜加仓」，与资金事实自相矛盾（2026-09-02 修正）
+        parts.append("<b>操作</b>：主力资金净流入，可继续持有观察；以日内低点为止损参考，"
+                     "跌破则减仓。仓位是否增加需结合板块资金面与量能，不宜仅凭个股资金单因子加码。")
     else:
-        parts.append("<b>操作</b>：主力净流出背景下不宜急于加仓；以日内低点为止损参考，等待板块资金面转向信号。")
+        parts.append("<b>操作</b>：资金流数据缺失，暂以日内低点为止损参考，等待板块资金面与量能给出更明确信号。")
     return "".join(parts)
 
 # ================= 组装 HTML =================
@@ -744,8 +960,20 @@ BR_missing = (BR.get("missing", 0)) if BR else 0
 BR_tot = BR_valid  # 占比分母统一用有效样本
 up_ratio = BR_up / BR_valid * 100 if BR_valid else 0
 
+# 量价关系提示（依赖 up_ratio，须在其后计算）
+DIVERG_NOTE = build_divergence_note()
+
+MCP_NOTE = (args.mcp_note.strip() if args.mcp_note else
+            "本报告数据<b>全部来自上述公开行情接口</b>（腾讯财经 / 东方财富），"
+            "未使用 westock-mcp / tdx-connector（当前环境未连接或未注册，脚本亦未调用任何 MCP）。")
+
 # 事实层：在叙事函数调用前推导（供各 build_* 引用）
 FACTS = compute_facts()
+
+# 上证日内形态中文描述（供量能结论等处复用，避免硬编码「冲高回落」）
+_PAT_CN = {"dip_then_rebound": "低开探底后回升", "rush_then_fall": "冲高回落",
+           "strong": "单边走强", "weak": "弱势震荡"}
+PAT_CY = _PAT_CN.get((FACTS.get("index_pattern") or {}).get("value"), "震荡")
 
 # 叙事 / 点评（可被 --narrative 覆盖）
 OV = {}
@@ -996,15 +1224,13 @@ body{{padding:9px;font-size:13px}} header{{padding:15px}} h1{{font-size:18px}}
 <td class="num {'down' if VZ['proj_vs_avg5']<100 else 'up'}">{VZ['proj_vs_avg5']:.0f}%</td></tr>
 </tbody></table></div>
 <div class="note">
-<b>量能结论：上午量能偏弱（推算全日约前5日均量 {VS['proj_vs_avg5']:.0f}%），与指数冲高回落同时出现。</b>两市上午合计成交 <b>{am_amt_tot:,.0f} 亿元</b>。
+<b>量能结论：上午量能偏弱（推算全日约前5日均量 {VS['proj_vs_avg5']:.0f}%），与指数{PAT_CY}同时出现。</b>两市上午合计成交 <b>{am_amt_tot:,.0f} 亿元</b>。
 以成交量口径衡量（数据可精确比对）：沪市上午 {VS['am_vol']/1e4:,.0f} 万手，
 仅相当于前 5 个交易日<b>全日</b>均量（{VS['avg5_full']/1e4:,.0f} 万手）的 <b>{VS['ratio']:.1f}%</b>；
 深市为 <b>{VZ['ratio']:.1f}%</b>。A股上午成交通常占全日约 55%–58%，
 据此推算全日量能约为前 5 日均量的 <b>{VS['proj_vs_avg5']:.0f}%（沪）/ {VZ['proj_vs_avg5']:.0f}%（深）</b>，
 即<b>基本持平至小幅缩量</b>，并未出现主线行情所需的放量突破。<br>
-<b>量价背离警示：</b>创业板指涨 {sgn(IM['sz399006']['am_pct'])}% 而量能未同步放大，同时<b>仅 {up_ratio:.0f}% 个股上涨</b>，
-构成"<b>指数涨、个股跌、量能平</b>"的典型缩量结构性行情。该形态下，资金净流入居前的板块相对更具韧性，
-但<b>指数缺乏向上突破的动能</b>，下午若量能仍不能放出，高位品种回落风险大于上行空间。<br>
+{DIVERG_NOTE}
 <span style="color:#64748b">口径说明：上午成交额取自分时数据 11:30 累计值（精确）；成交量对比采用日K成交量（精确）。
 因公开接口未提供历史分时成交额，故未做"上午 vs 历史同期上午"的成交额直接对比，改以成交量占比推算，结论方向一致。</span>
 </div>
@@ -1060,7 +1286,7 @@ body{{padding:9px;font-size:13px}} header{{padding:15px}} h1{{font-size:18px}}
 </div>
 <div class="note">
 <b>下午操作总纲：</b>
-① <b>做主线、不做补涨</b>——资金与宽度双验证的方向胜率最高，其余在 {up_ratio:.0f}% 上涨占比环境下追高胜率低；
+① <b>{'做主线、不做补涨' if up_ratio < 45 else '轻指数、重个股'}</b>——{'资金与宽度双验证的方向胜率最高，其余在 ' + format(up_ratio, '.0f') + '% 上涨占比环境下追高胜率低' if up_ratio < 45 else '上涨占比 ' + format(up_ratio, '.0f') + '% 显示个股层面赚钱效应尚可，可侧重个股alpha，但仍需回避无资金验证的纯题材补涨'}；
 ② <b>盯关键位</b>——上证 <b>{IM['sh000001']['low']:.2f}</b>（上午低点，破位则降低总仓位）、科创50 <b>{IM['sh000688']['prev']:.2f}</b>（昨收，破位则成长股离场）；
 ③ <b>持仓分级处理</b>——顺主线持有、主力流出标的逢反弹减仓、弱势板块不加仓等资金转向。
 <br><span style="color:#64748b">本报告为数据复盘与逻辑推演，不构成投资建议；所有价位均为技术参考，实际操作请结合自身风险承受能力。</span>
@@ -1077,8 +1303,7 @@ body{{padding:9px;font-size:13px}} header{{padding:15px}} h1{{font-size:18px}}
 个股分钟级资金流（主力/超大单/大单/中单/小单）、全市场涨跌家数<br>
 <span class="src-tag">东方财富 push2ex</span> 涨停池（{len(zt)} 只，含连板数/首封时间/开板次数）与跌停池（{len(dt)} 只）<br>
 <span class="src-tag">东方财富 财经要闻流</span> 资讯 {len(news)} 条（{'09:00–11:30 上午时段' if MODE=='strict-midday' else '当日全时段'}筛选 {len(sel)} 条纳入报告）<br><br>
-<b>数据提供方：</b>本报告数据<b>全部来自上述公开行情接口</b>（腾讯财经 / 东方财富），
-未使用 westock-mcp / tdx-connector（当前环境未连接或未注册，脚本亦未调用任何 MCP）。
+<b>数据提供方：</b>{MCP_NOTE}
 运行模式 <b>{MODE}</b>；数据质量等级 <b>{(D.get('quality') or {}).get('level','未知')}</b>
 （核心数据缺失会阻止报告生成，缺失项见各模块口径说明）。<br>
 <b>采集技术要点（供复用）：</b>① 东财 push2 的 <code>fs</code> 参数空格必须编码为 <code>+</code>（用 <code>%20</code> 会返回空响应）；
