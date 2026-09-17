@@ -91,12 +91,34 @@ facts = {
 
 完成后：从"漂亮的日报生成器"升级为"真正可信的午盘决策流水线"。
 
-## 三、Codex 兼容性清理（随 roadmap 一并处理）
-- `deploy_to_github.py` 属仓库维护工具，**不应随运行时 skill 安装** → 移出 `scripts/` 到 `tools/` 或独立维护仓库。
-- SKILL.md line 4 `agent_created: true` 顶层字段通不过 Codex 标准校验 → 移入 `metadata` 块，或为 WorkBuddy / Codex 分别提供清单。
-- SKILL.md line 3/69-70/99 把 `present_files` 写成跨平台"必须调用" → 改为"使用当前环境可用的文件交付能力"。
-- PAT 经命令行参数传入会留在 shell 历史 → 改用环境变量 / 交互式输入，或文档提示风险。
-- 数据来源区（line 948）固定声称 MCP 失败，但脚本并未检测 MCP → 改为记录真实使用的数据提供方（公开 API 降级）。
-- 盈利持仓徽章（line 577）固定写"浮亏" → 动态显示浮盈/浮亏。
-- 持仓点评（line 464 "平开后"、line 481 "距成本仍有较大距离"）→ 条件判断。
-- 资金流"主力净流入 10 亿"类绝对阈值对大小板块不公平 → 改为排名/分位数/相对成交额。
+## 三、Codex / 跨 Agent 兼容性（2026-09-15 完成）
+
+**基础清理（v4.2 已完成）：**
+- ✅ `deploy_to_github.py` 属仓库维护工具，**不应随运行时 skill 安装** → 已移出 `scripts/` 到 `tools/`。
+- ✅ `agent_created: true` 顶层字段通不过标准校验 → 已移入 `metadata` 块。
+- ✅ `present_files` 原写成跨平台"必须调用" → 已改为"使用当前环境可用的文件交付能力"。
+- ✅ PAT 经命令行参数传入会留在 shell 历史 → 工具已支持自动从 `git credential` 取，不再要求 `--token`。
+- ✅ 数据来源区固定声称 MCP 失败 → 已改为记录真实使用的数据提供方。
+- ✅ 盈利持仓徽章固定写"浮亏" → 已动态显示浮盈/浮亏。
+- ✅ 持仓点评固定串（"平开后"/"距成本仍有较大距离"）→ 已条件判断。
+- ✅ 资金流"净流入 10 亿"类绝对阈值 → 已改排名/分位数。
+
+**跨 Agent 通用化（2026-09-15，v4.7 新增）：**
+- ✅ **安装路径标准化（最实质的一处）**：`README.md` 原写 Codex 项目级为 `.codex/skills/`，
+  而项目级实际已收敛到中立目录 **`.agents/skills/`**（Codex 自 cwd 向上搜索至仓库根）。
+  已改为 `.agents/skills/`（项目级）+ `~/.agents/skills/`（用户级），并补上
+  Cursor / Gemini CLI / GitHub Copilot / OpenCode 共用同一路径的说明，
+  以及 **Claude Code 的例外**（只读 `.claude/skills/`，不读 `.agents/skills/`）。
+- ✅ **Codex 侧展示元数据**：新增 `agents/openai.yaml`（`interface.display_name` /
+  `short_description` / `default_prompt`），与 `$midday-a-share-review` 显式调用对应。
+- ✅ **frontmatter 合规**：`version` 4.2 → **4.8**（此前 5 个版本未同步，是个真实笔误；现已随每次改版同步递增）；
+  新增标准可选字段 `compatibility`（Python 版本 / 网络端点 / MCP 为可选增强）。
+- ✅ **环境差异显式化**：降级链第 1–3 级标注为 **WorkBuddy 连接器专属**，
+  明确 Codex 下只有第 4 级公开 API 可用、且在该环境下这是**正常路径而非降级**
+  （两个脚本零 MCP 依赖，开箱即用）。
+
+> **核心结论**：本 skill 的**内容格式本就符合 Agent Skills 开放标准**，
+> 通用化的真正障碍不在代码，而在「**文档写错了安装路径**」与「**未声明环境能力差异**」——
+> 这两点会直接把使用者带到错误的地方，且不会报错。
+> 另：`.agents/skills/` 是**实现约定而非规范强制**（规范只定目录内部结构、不定搜索路径），
+> 移植性需在「内容 / 发现 / 调用 / 运行时」四层分别验证，通过第一层不代表第四层可用。
