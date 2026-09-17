@@ -4,7 +4,7 @@ description: 生成 A股午间复盘自包含 HTML 报告。固化 8 大模块�
 compatibility: "Python 3.9+（仅标准库，无第三方依赖）；需可访问 qt.gtimg.cn / web.ifzq.gtimg.cn / push2.eastmoney.com。MCP 连接器（westock-mcp / tdx-connector / hithink-finance）为可选增强，非必需。"
 metadata:
   agent_created: true
-  version: 4.8
+  version: 4.9
   trust: "时间一致性 / 数据可审计 / 叙事有条件"
 ---
 
@@ -363,7 +363,7 @@ python generate_midday_review.py --date 2026-08-21 \
 此前"4 跌 3 涨"的说法是按夹具 `snapshot.pct` 误读所致，`snapshot.pct` 与 `am_pct` 两套口径并不一致——
 详见「第九批」开头的证据方法与 `tests/run_three_state.py` 顶部提示。）
 
-**第十批（2026-09-17 实测发现，第 12 形态「科技成长主导的普涨共振」批次 5 处：缺陷 #38/#39/#40 + 工具链 #41/#42）：**
+**第十批（2026-09-17 实测发现，第 12 形态「科技成长主导的普涨共振」批次 7 处：缺陷 #38/#39/#40 + 工具链 #41/#42/#43/#44）：**
 
 | # | 症状 | 修正 |
 |---|---|---|
@@ -372,6 +372,8 @@ python generate_midday_review.py --date 2026-08-21 \
 | 40 | `tests/build_fixtures.py` 的 `--real` 模式因**对象别名（aliasing）**写出错误元数据：`coerce_base(d)` 会**原地**把 `d["meta"]` 重置为硬编码基底日期 `2026-08-21 11:30:00`，而它收到的 `d` **就是** `real_fixture()` 里的 `base` 本身；旧代码把 `src_meta = base.get("meta")` 写在 `coerce_base(base)` **之后**，等于读自己刚被覆盖掉的值 → 所有 `--real` 夹具的 `meta.report_date` / `collected_at` 长期写成 2026-08-21（`low_open_recover` 源 09-10、`index_split_bear` 源 09-15、`broad_tech_surge` 源 09-16 **全部中招**），直接违背本 skill 的 trust 标签「时间一致性 / 数据可审计」 | `src_meta` 取值**前移到 `coerce_base()` 之前**（并加注释警示该函数会原地重置 meta）；3 份受影响夹具用修复后脚本重新生成，已逐字段核验**除 meta 日期外完全等价**、无其他漂移 |
 | 41 | `tools/deploy_to_github.py` 的 `api()` **只在 DNS 失败（`getaddrinfo`）时**降级 curl 后端，对**超时 / 连接重置**（WinError 10060 等）直接抛异常向上冒泡 —— 而本机（家宽 / 沙箱）对 `api.github.com` 是**间歇可达**，实测本次发布**第 1 次尝试即在中间文件上整脚本 abort**（26 个文件跑到一半 Traceback 退出），必须人工重跑 | `api()` 加**指数退避重试**（`tries=4`，1.5s×n）+ 连接类异常同样降级 curl 后端（curl 走独立 TCP 栈，抖动时往往能通）；抽出 `_RETRY_MARKS` 判定，**只重试网络类异常**——已拿到 HTTP 状态码（含 4xx/5xx）一律直接返回，既不重试也不掩盖权限等问题 |
 | 42 | `main()` 的逐文件上传循环中，任一文件失败只 `print("[FAIL] …")` 便**继续执行**，末尾照样打印"完成"并以**退出码 0** 结束 —— 调用方无法从退出码分辨"全部成功"与"部分失败"（**假成功**） | 循环内已 `try/except` 包裹并收集 `failed` 列表；末尾若有失败则打印失败明细 + **`sys.exit(1)`**，并提示"逐文件 PUT 幂等，重跑即可"；仅全部成功时才打印 `完成（N 个文件全部上传成功）` |
+| 43 | `tools/deploy_to_github.py` **只有 PUT、没有任何 DELETE 语义** —— 因此"本地删了"**从不等于**"远端删了"。实测证据：`tests/breadth_20260824.json`（`--selftest` 残留）本机已于 2026-09-15 删除、且已加入 `SKIP_GLOBS` 不再上传，但远端 2026-09-01 那次发布留下的副本**至今仍在**，形成"本地零残留、远端有残留"的假象（全量隐私复扫才发现）。该字段类缺陷渲染与回归均不可见 | 新增 `remote_manifest()`（取远端 tree，失败**返回原因而非抛异常**）、`find_orphans()`（纯函数：远端有而本地清单无 = 孤儿）、`delete_remote_file()`（先 GET sha 再 DELETE，404 视为幂等成功）、`list_or_prune()`（统一入口，返回退出码）；新增 `--list-orphans`（只读报告）与 `--prune-orphans`（**显式**删除，默认关闭）与 `--keep-remote`（追加豁免通配）。**三重安全**：① 孤儿处理**只在上传全部成功之后**执行——中途失败时远端处于半态，"远端有而本地无"会把刚失败的文件也误判为孤儿；② `KEEP_REMOTE` 白名单豁免 `LICENSE`/`NOTICE`/`.github/**`/`CHANGELOG.md`，避免误删仅在网页端维护的文件；③ 取不到远端清单时**绝不继续**，`--prune-orphans` 下直接判失败 |
+| 44 | `api()` / `_api_curl()` 使用 `urllib.urlopen` 与 curl 的**隐式 env 代理**。2026-09-17 本次实测：沙箱自动注入 `HTTP_PROXY=HTTPS_PROXY=http://127.0.0.1:63370`，该 egress 代理对 `api.github.com` 返回 **`Tunnel connection failed: 502 Bad Gateway`** —— 连 `--list-orphans` 这种**纯只读**动作都直接抛 Traceback 崩溃（`api()` 的重试标记里没有"隧道/网关"类，判定为不可重试即 `raise`）；而**同一台机器直连正常**（前一日发布即直连成功）。属"环境变了但工具假设没变" | ① 传输顺序改为**直连优先**：`_api_urllib` 改用显式 `ProxyHandler({})`（禁用 env 代理），env 代理降为**兜底候选**，`_api_curl` 补 `--noproxy '*'`；新增 `--proxy URL` 供确实需要代理的场景强制指定（置 `_FORCE_PROXY`，此时不再试直连）；② `_RETRY_MARKS` 补入 `tunnel connection failed` / `bad gateway` / `proxy` / `502` / `503` / `407`；③ `remote_manifest()` 与 `create_repo()` 调用点加 `try/except`，网络不可达时**给干净提示**（含"原样重跑通常即可 / 可加 --proxy"）而**不是抛 traceback** |
 
 **教训（2026-09-17）**：本期两处**均属"同一段文字内部自相矛盾"**，与此前的"跨模块口径互斥"（#34）是同一类病 ——
 **硬编码的尾句 / 收尾句最容易逃过 review**：它不承载任何数据，读起来永远像"通顺的废话"，
@@ -389,6 +391,20 @@ python generate_midday_review.py --date 2026-08-21 \
 → **#41 / #42 暴露的是"工具链自身的失败语义"**：前者把"网络抖动"升级成"整次发布中断"，
 后者让"部分失败"伪装成"全部成功"。二者叠加意味着 **一条命令跑完没报错 ≠ 内容真的上去了**。
 凡有对外副作用的脚本：① 网络类错误必须**重试/降级**而非冒泡；② **退出码必须承载"是否全部成功"**。
+
+→ **#43 是"本地状态即真理"这个隐含假设的反例**：`collect_files(SKILL_DIR)` 给出的是**本地上传清单**，
+而"仓库当前内容"是**另一份状态**，二者只能靠比对发现差异。工具只有 PUT 时，**删除是单向的**：
+本地删掉的文件在远端永久存活，且**任何本地检查都照不出来**（本地零残留、复扫也只看得到"多了一个"）。
+教训：**凡"本地清单 → 远端"的单向同步工具，必须补一个反向核对（remote × local 的差集）**，
+并把它做成默认可见的报告；破坏性动作（删除）则必须显式开关 + 白名单豁免 + 取不到远端状态即失败。
+→ 这条与 #40「元数据没人看」是同一族：**缺陷不一定在输出里**——#40 错在看不见的字段，
+#43 错在看不见的**远端状态**。审计信任链的底座恰恰由这些"没人看的地方"构成。
+
+→ **#44 是"环境变了但工具假设没变"**：`urllib` / `curl` 都会**默默读取 env 代理**，
+昨天没有代理时直连正常、今天沙箱注入代理后立刻 502，而工具对此毫无察觉（连只读命令都崩）。
+教训：**凡是本地已有成功记录的对外动作，也要把"环境假设"写进工具**（这里是"直连优先、代理兜底"），
+而不是依赖"上次能跑通"。且**只读路径同样需要容错**——`--list-orphans` 崩在 traceback 上，
+会让使用者以为"这个功能本来就不work"，从而再也不用它。
 
 **第六批（2026-09-10 实测发现，缺陷 #24：走势叙事"翻红"硬编码）：**
 
@@ -425,9 +441,10 @@ python generate_midday_review.py --date 2026-08-21 \
 
 ### 回归测试（改完脚本必做）
 改动 `generate_midday_review.py` 后，用**不同行情形态**渲染确认分支都触发正确、无未替换占位。
-**首选仓库自带的十二态夹具回归**（不依赖本机历史数据，任何机器可跑）：
+**首选仓库自带的回归套件**（不依赖本机历史数据，任何机器可跑）：
 ```bash
-cd <skill>/tests && python run_tests.py    # 采集器落盘契约 + 十二态渲染（含负断言），全绿退出 0
+cd <skill>/tests && python run_tests.py
+# 三个套件：① 采集器落盘契约 ② 发布工具孤儿检测 ③ 十二态渲染（含负断言）；全绿退出 0
 ```
 十二份夹具覆盖 SKILL 规定的十二种形态：普涨（82%）/ 分化（46%）/ 普跌（18%）/
 **权重拖累**（`weight_drag_merged.json`：7 大指数翻跌 -0.6% + 66% 个股上涨，
@@ -532,7 +549,7 @@ done
 **→ 推论：夹具不仅要覆盖形态，还要对「每个模块的关键结论句」都设断言**；
 只断言 M01 而不管 M06，等于把跨模块一致性交给了运气。
 
-## 分发到 GitHub（可选，v4.7 加脱敏闸门，v4.8 加网络重试与失败退出码）
+## 分发到 GitHub（可选，v4.7 加脱敏闸门，v4.8 加网络重试与失败退出码，v4.9 加远端孤儿核对与代理治理）
 
 `tools/deploy_to_github.py` 走 GitHub REST API（`api.github.com`）建仓并上传，
 **不用 `git push`**——规避 `github.com:443` 上行 TLS 不稳（本机间歇通、备用机全拦）。
@@ -542,14 +559,32 @@ token 优先 `--token`，省略时自动从 `git credential fill` 取（不在�
 # ① 先只评审（推荐：确认闸门与清单，零外部动作）
 python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --audit-only
 
-# ② 通过后再发布
-python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --template
+# ② 顺便做远端孤儿体检（只读，需 token）
+python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --list-orphans
+
+# ③ 通过后再发布；若体检报了孤儿，加 --prune-orphans 一并清理
+python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --template \
+    --prune-orphans
 ```
 
-**网络与退出码语义（v4.8，缺陷 #41/#42 修复）**：
+**远端孤儿核对（v4.9，缺陷 #43 修复）**：本工具**只做 PUT，没有 DELETE 语义**，
+所以"本地删了"从不等于"远端删了"——`tests/breadth_20260824.json` 就是 2026-09-01 发布留下的
+远端尸体（本地 09-15 已删、`SKIP_GLOBS` 也已挡住，但远端副本一直活到 09-17 才被发现）。
+- `--list-orphans`：列出**远端有、本地上传清单没有**的文件，**零写入**（可与 `--audit-only` 同用）。
+- `--prune-orphans`：**显式**删除这些孤儿（逐文件 DELETE，幂等，中途失败打全清单并非零退出）。
+- `--keep-remote 'LICENSE,assets/*'`：追加豁免通配；内置 `KEEP_REMOTE` 默认豁免
+  `LICENSE` / `NOTICE` / `.github/**` / `CHANGELOG.md`，避免误删**仅在网页端维护**的文件。
+- **三重安全**：孤儿处理只在上传**全部成功之后**跑（半态下会把刚失败的文件误判为孤儿）；
+  取不到远端清单时**直接判失败**而非当作"远端为空"；删除必须显式开关，默认永不删。
+
+**网络与代理（v4.8 缺陷 #41/#42，v4.9 缺陷 #44）**：
 - `api.github.com` 在本机（家宽 / 沙箱）是**间歇可达**的，因此 `api()` 自带
-  **指数退避重试（4 轮）+ 连接类异常降级 curl 后端**；**只重试网络类异常**，
-  已拿到 HTTP 状态码（含 4xx/5xx）一律直接返回，不会掩盖权限等问题。
+  **指数退避重试（4 轮）**；**只重试网络类异常**，已拿到 HTTP 状态码（含 4xx/5xx）
+  一律直接返回，不会掩盖权限等问题。
+- **传输顺序：直连优先 → env/`--proxy` 代理兜底 → curl 后端**（curl 走独立 TCP 栈，
+  抖动时往往能通）。**沙箱可能注入 `HTTP_PROXY` 指向本地 egress 代理，实测该代理对
+  GitHub 返回 `502 Bad Gateway`，故默认显式禁用 env 代理**（`ProxyHandler({})` +
+  curl `--noproxy '*'`）；确实需要代理时用 `--proxy <url>` 强制指定。
 - 逐文件上传循环会收集失败清单：**任一文件失败即 `sys.exit(1)`**，全部成功才 exit 0。
   → **退出码可以信任**：`0` = 全部上传成功；`1` = 有文件失败（打印明细）。
   失败多为网络抖动，**直接重跑同一条命令即可**（逐文件 PUT 是幂等的）。
@@ -571,6 +606,20 @@ python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --p
 > （6 位数字按「数字边界」匹配，避免把 `-1234568816.0` 这类长数字尾段误判为代码）。
 
 ## 变更记录
+- **v4.9（2026-09-17，同日第二批）**：发布工具链 2 处（缺陷 #43/#44）+ 新增单测 `test_deploy_orphans.py`
+  （tests 由 2 个套件增至 3 个）。
+  1. **#43（远端孤儿）**：工具只有 PUT 没有 DELETE，"本地删了"从不等于"远端删了"——
+     `tests/breadth_20260824.json` 在远端存活到 09-17 才被发现。
+     新增 `remote_manifest()` / `find_orphans()` / `delete_remote_file()` / `list_or_prune()`
+     + `--list-orphans` / `--prune-orphans` / `--keep-remote`，并加**三重安全**
+     （仅上传全成功后执行 / KEEP_REMOTE 白名单 / 取不到远端清单即失败）。
+  2. **#44（隐式 env 代理）**：沙箱注入 `HTTP_PROXY=127.0.0.1:63370` 后，
+     `urllib` 与 curl 都会静默走它，而该代理对 GitHub 返回 `502 Bad Gateway`，
+     连只读的 `--list-orphans` 都崩在 traceback 上。改为**直连优先**（显式 `ProxyHandler({})`
+     + curl `--noproxy '*'`），env 代理降为兜底，新增 `--proxy` 强制指定；
+     `_RETRY_MARKS` 补入隧道/网关类标记；`remote_manifest()` / `create_repo()` 加干净的错误提示。
+  3. **本次实际清理**：`--prune-orphans` 删除了远端唯一孤儿 `tests/breadth_20260824.json`
+     （162 B，`--selftest` 合成产物，零引用）；清理后远端孤儿数归零。
 - **v4.8（2026-09-17）**：修复第 12 形态「科技成长主导的普涨共振」批次 3 处（缺陷 #38/#39/#40）
   + tests 升级**十二态**（新增 `broad_tech_surge` 真实脱敏夹具）。
   1. **#38（同一段文字内部自相矛盾）**：模块 04 `build_divergence_note()` 的结论尾句（非放量档）
@@ -662,6 +711,10 @@ python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --p
       （`.runlog.txt` / `_final.txt` / `_runlog_utf8.txt` / `_run_utf8.py`）列入 `SKIP_NAMES` 与 `.gitignore`；
       **该 4 个文件连同 `tests/breadth_20260824.json`（`--selftest` 手工残留）已于 2026-09-15 一并删除**，
       清单条目保留作防御。另新增 `SKIP_GLOBS` 通配排除（`breadth_*.json` / `midday_merged_*.json`）——
+      ⚠️ **但当时只删了本地**：`breadth_20260824.json` 的**远端副本一直存活到 2026-09-17**
+      （09-01 那次发布留下的），直到 v4.9 补上远端孤儿核对（缺陷 #43）才被 `--prune-orphans` 清掉。
+      → 这正是本 Skill 反复强调的同一类教训：**"我做了清理" ≠ "状态真的被清理了"**，
+      凡是跨"本地/远端"两个状态的动作，都必须有一次**反向核对**来证明。
       散落的采集产物此前不在任何排除规则内，是个真实盲区。
   12. **附带修复（闸门误报）**：`leak_scan()` 原为朴素子串匹配，**会把 JSON 里长数字的尾段当成代码**——
       实测某持仓代码与其所在板块资金流 `netflow: -1234568816.0` 的尾段完全相同，导致脱敏**明明成功**
