@@ -5,3 +5,14 @@ __pycache__/
 
 # 三态回归测试的产物（每次 run_three_state.py 重跑生成，不入仓库）
 tests/fixtures/*_review.html
+
+# 回归运行日志与一次性调试脚本（2026-09-15 已从本机删除，模式保留作防御；
+# tools/deploy_to_github.py 的 SKIP_NAMES / SKIP_GLOBS 同步）
+tests/.runlog.txt
+tests/_final.txt
+tests/_runlog_utf8.txt
+tests/_run_utf8.py
+
+# 散落的采集 / 自检产物（如 --selftest 在工作目录残留的广度快照），非测试夹具
+tests/breadth_*.json
+midday_merged_*.json
