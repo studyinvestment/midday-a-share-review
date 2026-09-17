@@ -15,7 +15,7 @@
     命中真实持仓代码/名称即**中止发布**（退出码 5）。详见 `leak_scan()` 与 `--allow-privacy-leak`。
   - 首次上传会在新仓库 main 分支创建初始提交。
 """
-import os, sys, json, base64, re, fnmatch, argparse, subprocess, urllib.request, urllib.error
+import os, sys, json, base64, re, fnmatch, argparse, subprocess, time, urllib.request, urllib.error
 
 API = "https://api.github.com"
 # 本脚本位于 <skill>/tools/，上传根目录为上一级（即 skill 根）
@@ -165,14 +165,49 @@ def _api_curl(method, path, token, body):
     return content, code
 
 
-def api(method, path, token, body=None):
-    """统一入口：urllib 优先；若 DNS 直连失败（Windows 沙箱常见）自动降级 curl 后端。"""
-    try:
-        return _api_urllib(method, path, token, body)
-    except urllib.error.URLError as e:
-        if "getaddrinfo" in str(e) or "Name or service not known" in str(e):
-            return _api_curl(method, path, token, body)
-        raise
+# 网络类可重试异常标记：本机（家宽/沙箱）对 api.github.com 是**间歇可达**，
+# 一次抖动就会让整次发布在中间文件上中断，故对连接类错误做退避重试 + curl 降级。
+_RETRY_MARKS = ("getaddrinfo", "name or service not known", "timed out", "timeout",
+                "10060", "10054", "10053", "10051", "connection reset", "connection aborted",
+                "connection refused", "temporary failure", "eof occurred", "ssl", "handshake",
+                "network is unreachable", "no route to host", "remote end closed")
+
+
+def _is_retryable(exc):
+    s = str(exc).lower()
+    return any(k in s for k in _RETRY_MARKS)
+
+
+def api(method, path, token, body=None, tries=4):
+    """统一入口：urllib 优先；网络类错误**退避重试**，并降级 curl 后端。
+
+    2026-09-17 修复（缺陷 #41）：原实现只在 DNS（`getaddrinfo`）失败时降级 curl，
+    对**超时 / 连接重置**（WinError 10060 等）直接抛异常 —— 实测本机对 api.github.com
+    间歇可达，一次抖动即让整次发布在中间文件上 abort（26 个文件中途失败，需人工重跑）。
+    现改为：连接类异常 → 先试 curl 后端（TCP 栈行为不同，常能通过）→ 退避重试，共 tries 轮。
+    **只重试网络类异常**；已拿到 HTTP 状态码（含 4xx/5xx）一律直接返回，不重试也不掩盖。
+    """
+    last = None
+    for i in range(tries):
+        try:
+            resp, code = _api_urllib(method, path, token, body)
+            if code:
+                return resp, code
+            last = RuntimeError("空响应（状态码 0）")
+        except Exception as e:            # HTTPError 已在 _api_urllib 内转为 (body, code)
+            if not _is_retryable(e):
+                raise
+            last = e
+        # 网络抖动：先试 curl 后端
+        try:
+            resp, code = _api_curl(method, path, token, body)
+            if code:
+                return resp, code
+        except Exception as e:
+            last = e
+        if i < tries - 1:
+            time.sleep(1.5 * (i + 1))
+    raise urllib.error.URLError(f"api 连续 {tries} 次不可达（网络窗口期？）: {last}")
 
 
 def get_token(explicit):
@@ -295,23 +330,34 @@ def main():
         sys.exit(1)
     print(f"[OK] 仓库就绪：https://github.com/{args.owner}/{args.repo} {('('+msg+')') if msg else ''}")
 
+    failed = []
     for rel, full in files:
         with open(full, "rb") as fh:
             content = base64.b64encode(fh.read()).decode("ascii")
-        get, gc = api("GET", f"/repos/{args.owner}/{args.repo}/contents/{rel}", token)
-        body = {"message": f"add {rel}", "content": content, "branch": "main"}
-        if gc == 200:
-            try:
-                body["sha"] = json.loads(get)["sha"]
-            except Exception:
-                pass
-        r, st = api("PUT", f"/repos/{args.owner}/{args.repo}/contents/{rel}", token, body)
+        try:
+            get, gc = api("GET", f"/repos/{args.owner}/{args.repo}/contents/{rel}", token)
+            body = {"message": f"add {rel}", "content": content, "branch": "main"}
+            if gc == 200:
+                try:
+                    body["sha"] = json.loads(get)["sha"]
+                except Exception:
+                    pass
+            r, st = api("PUT", f"/repos/{args.owner}/{args.repo}/contents/{rel}", token, body)
+        except Exception as e:                      # 网络窗口期抖动：记录并继续，最后统一报错
+            r, st = str(e), 0
         if st in (200, 201):
-            print(f"  [OK] {rel}")
+            print(f"  [OK]   {rel}")
         else:
-            print(f"  [FAIL] {rel} ({st}): {r[:200]}")
+            failed.append(rel)
+            print(f"  [FAIL] {rel} ({st}): {str(r)[:200]}")
 
-    print("完成。克隆后放入自己的 holdings.json 即可使用。")
+    # 2026-09-17 修复（缺陷 #42，假成功）：原实现即使有文件上传失败，也照样打印"完成"
+    # 并以退出码 0 结束 —— 调用方无法从退出码分辨"全部成功"与"部分失败"。
+    if failed:
+        print(f"\n[FAIL] {len(failed)}/{len(files)} 个文件上传失败：{', '.join(failed)}")
+        print("       多为网络窗口期抖动，**重跑本命令即可**（逐文件 PUT、幂等，已成功的不受影响）。")
+        sys.exit(1)
+    print(f"完成（{len(files)} 个文件全部上传成功）。克隆后放入自己的 holdings.json 即可使用。")
 
 
 if __name__ == "__main__":
