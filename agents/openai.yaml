@@ -1,0 +1,4 @@
+interface:
+  display_name: "A 股午间复盘"
+  short_description: "采集午盘行情，生成 8 模块自包含 HTML 复盘报告"
+  default_prompt: "使用 $midday-a-share-review 生成今天的 A 股午间复盘报告，并在文末标注实际数据来源与运行模式。"
