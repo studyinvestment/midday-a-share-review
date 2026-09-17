@@ -139,13 +139,24 @@ def collect_snapshot():
 
 
 # ============ 2. 分时（腾讯，保留 0930-1130） ============
+# 2026-09-14 新增：腾讯分时在 data 节点下**额外返回 date 字段**（形如 "20260914"），
+# 原实现只读 data 数组、丢掉了它，导致「非交易日/接口返回上一交易日数据」无法察觉——
+# `--date == today` 闸门只挡得住"把今天的数据写成历史日期"，挡不住反方向：
+# 周六运行 DATE==周六 照样通过，但接口给的是周五的分时 → 报告被标成周六却用了周五数据。
+QUOTE_DATES = {}
+
+
 def get_minute(code):
     txt = get(f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={code}")
     if not txt:
         return None
     try:
         j = json.loads(txt)
-        arr = j["data"][code]["data"]["data"]
+        node = j["data"][code]["data"]
+        _qd = node.get("date")
+        if _qd:
+            QUOTE_DATES[code] = str(_qd)
+        arr = node["data"]
     except Exception as e:
         print(f"[FAIL] minute {code} {e}")
         return None
@@ -363,10 +374,25 @@ def build_quality(DATE, snapshot, minutes, br, news, mode):
     bad_min = []
     for c, n in INDEX_MAP:
         ms = (minutes or {}).get(c) or []
-        if not ms or ms[-1]["t"] > "1130":
+        # 2026-09-14 修复：原判据 `ms[-1]["t"] > "1130"` 恒不成立（get_minute 已截断到 <=1130），
+        # 属死代码，只能靠 `not ms` 捕捉"分时缺失"。改为校验上午序列是否真的完整：
+        # strict-midday 模式下末点必须正好是 1130，否则说明上午数据不完整。
+        if not ms or (mode == "strict-midday" and ms[-1]["t"] != "1130"):
             bad_min.append(n)
     if bad_min:
         warnings.append("分时末点非11:30: " + ",".join(bad_min))
+    # 行情日期校验（2026-09-14 新增）：分时接口只返回"最近一个交易日"的数据，
+    # 周末/节假日运行会拿到上一交易日数据，而 --date==today 闸门照样通过。
+    # 必须比对接口自带 date 与报告日，不一致即判 fail（核心事实错误，不放行）。
+    _qd = {c: d for c, d in QUOTE_DATES.items() if d}
+    if _qd:
+        _want = DATE.replace("-", "")
+        _bad_qd = sorted({d for d in _qd.values() if d != _want})
+        if _bad_qd:
+            errors.append(
+                "行情日期与报告日不符（接口返回 %s / 报告日 %s）：疑似非交易日运行，"
+                "或接口返回上一交易日数据（分时/快照只提供最近交易日）"
+                % (",".join(_bad_qd), _want))
     if br:
         if (br.get("up", 0) + br.get("down", 0) + br.get("flat", 0) + br.get("missing", 0)
                 != br.get("listed_total", 0)):
