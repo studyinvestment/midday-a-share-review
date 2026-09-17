@@ -3,7 +3,9 @@
 
 依次运行：
   1) test_collector_contract.py —— 采集器落盘契约（成功/失败均必写文件 + v2 关键字段）
-  2) run_three_state.py        —— 渲染器十二态回归（普涨/分化/普跌/权重拖累/普涨共振/
+  2) test_deploy_orphans.py    —— 发布工具远端孤儿检测（find_orphans / KEEP_REMOTE 豁免 /
+                                  collect_files 排除散落采集产物）
+  3) run_three_state.py        —— 渲染器十二态回归（普涨/分化/普跌/权重拖累/普涨共振/
                                   指数平×普涨/放量普跌/低开探底回升未翻红/开盘即高点单边下行/
                                   指数内部分化×普涨/指数涨跌互现×个股普跌/科技成长普涨共振
                                   + 工作日分支）
@@ -15,7 +17,7 @@
 import os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUITES = ["test_collector_contract.py", "run_three_state.py"]
+SUITES = ["test_collector_contract.py", "test_deploy_orphans.py", "run_three_state.py"]
 
 
 def main():
