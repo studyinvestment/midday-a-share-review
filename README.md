@@ -85,6 +85,11 @@ cd tests && python run_tests.py
   通过离线 `--selftest` / `--selftest-fail` 走真实 `save_outputs` 落盘，断言
   成功/失败两种结局下 `midday_merged_{DC}.json` 必然写出且含 v2 关键字段
   （`quality` / `sources` / `meta.as_of` / `breadth`）。**这是自动化的假成功防线**。
+- `test_deploy_orphans.py`：**发布工具远端孤儿检测**（v4.9 新增，缺陷 #43 的回归锁）。
+  断言 `find_orphans()` 只报「远端有而本地清单无」的路径、`KEEP_REMOTE` 白名单
+  （`LICENSE` / `.github/**` / `CHANGELOG.md` 等仅在网页端维护的文件）一律豁免，
+  以及 `collect_files()` 必须挡住 `breadth_*.json` / `midday_merged_*.json` 散落产物
+  （这正是 `tests/breadth_20260824.json` 当年被传上公开仓库的根因）。不联网。
 - `run_three_state.py`：渲染器**十二态**回归（普涨 / 分化 / 普跌 / 权重拖累 / 普涨共振 / 指数平×普涨 /
   放量普跌 / 低开探底回升未翻红 / 开盘即高点单边下行 / 指数内部分化×普涨 / 指数涨跌互现×个股普跌 /
   **科技成长普涨共振** + 非周五分支）。
@@ -106,9 +111,23 @@ cd tests && python run_tests.py
 # ① 先只评审：跑脱敏闸门 + 列出待上传清单，零外部动作
 python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --audit-only
 
-# ② 通过后再发布（token 省略即自动从 git credential 取，不进命令行历史）
-python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --template
+# ② 顺便体检远端孤儿（只读；本工具只做 PUT，删不掉远端文件 → 需反向核对）
+python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --list-orphans
+
+# ③ 通过后再发布（token 省略即自动从 git credential 取，不进命令行历史）
+#    若 ② 报了孤儿，加 --prune-orphans 一并清理
+python tools/deploy_to_github.py --owner <user> --repo midday-a-share-review --public --template \
+    --prune-orphans
 ```
+
+**远端孤儿核对（v4.9）**：本工具**只做 PUT、没有 DELETE 语义**，所以「本地删了」从不等于
+「远端删了」——`tests/breadth_20260824.json` 就是这样在远端存活到被发现。`--list-orphans` 只报告，
+`--prune-orphans` 才删除（默认关闭）；`KEEP_REMOTE` 内置豁免 + `--keep-remote` 可追加，
+且**只在全部上传成功后才执行**、**取不到远端清单即失败**。
+
+**网络**：`api.github.com` 在本机为**间歇可达**，故自带退避重试；传输顺序为
+**直连优先 → env/`--proxy` 代理兜底 → curl 后端**。沙箱可能注入 `HTTP_PROXY` 指向本地
+egress 代理（实测对 GitHub 返回 `502 Bad Gateway`），故默认**显式禁用 env 代理**。
 
 **发布前脱敏闸门（在 `create_repo` 之前执行）**：扫描全部待上传文本文件，命中真实持仓代码/名称即
 **中止发布**（退出码 5）；未取得脱敏名单时同样中止（退出码 6）。名单来源：`MIDDAY_PRIVACY`
