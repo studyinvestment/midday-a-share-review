@@ -111,7 +111,7 @@ facts = {
   以及 **Claude Code 的例外**（只读 `.claude/skills/`，不读 `.agents/skills/`）。
 - ✅ **Codex 侧展示元数据**：新增 `agents/openai.yaml`（`interface.display_name` /
   `short_description` / `default_prompt`），与 `$midday-a-share-review` 显式调用对应。
-- ✅ **frontmatter 合规**：`version` 4.2 → **4.9**（此前 5 个版本未同步，是个真实笔误；现已随每次改版同步递增）；
+- ✅ **frontmatter 合规**：`version` 4.2 → **4.10**（此前 5 个版本未同步，是个真实笔误；现已随每次改版同步递增）；
   新增标准可选字段 `compatibility`（Python 版本 / 网络端点 / MCP 为可选增强）。
 - ✅ **环境差异显式化**：降级链第 1–3 级标注为 **WorkBuddy 连接器专属**，
   明确 Codex 下只有第 4 级公开 API 可用、且在该环境下这是**正常路径而非降级**
